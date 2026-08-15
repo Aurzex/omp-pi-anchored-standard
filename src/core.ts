@@ -9,8 +9,10 @@
  * session's first durable promotion signal. The pi port is
  * (https://github.com/dbydd/pi-anchored-tool-for-dspro); the pure helpers
  * below mirror that implementation's semantics exactly, extended with the
- * upstream "zero-tool anchor" mode (zero-anchored-standard) and the
- * `promoteOn` trigger selector.
+ * upstream "zero-tool anchor" mode (zero-anchored-standard), the `promoteOn`
+ * trigger selector, the permanent minimal persona (DSH `minimal` preset), and
+ * the first-request output-budget cap (`bootstrapMaxTokens`, upstream issue
+ * #6).
  */
 
 export interface ToolLike {
@@ -279,10 +281,112 @@ export function zeroAnchorPayload(
 	return { payload: next, anchored: true };
 }
 
+/** DSH minimal-mode system prompt, byte-identical to the DeepSeek Harness
+ * `minimal` preset persona (`complete: true` — the persona IS the entire
+ * system prompt). This codex-style one-liner is the co-equal trajectory
+ * anchor alongside the tool catalog: rewording it breaks the `We need`
+ * reasoning style (xiaobright/modeltest trigger-mechanism experiments).
+ * The byte string must not be invented or reworded. */
+export const MINIMAL_SYSTEM_PROMPT =
+	"You are a helpful software engineer assistant.";
+
+export interface SystemPromptRewrite {
+	/** True when the payload was modified. */
+	changed: boolean;
+	/** Replacement payload — same reference when unchanged. */
+	payload: unknown;
+}
+
+/**
+ * Replace the harness-injected system prompt (the front of the context) with
+ * the given persona text. Handles both serialized shapes the hosts produce:
+ *
+ * - OpenAI-compatible: `payload.messages[0]` with role `system`/`developer`
+ * - Anthropic-style: top-level `payload.system` string
+ *
+ * Fails safe: if neither shape is present the payload is returned unchanged;
+ * non-string system content (e.g. Anthropic block arrays) is never touched.
+ */
+export function rewriteSystemPrompt(
+	payload: unknown,
+	text: string,
+): SystemPromptRewrite {
+	if (typeof payload !== "object" || payload === null) {
+		return { changed: false, payload };
+	}
+	const p = payload as Record<string, unknown>;
+
+	if (typeof p.system === "string" && p.system !== text) {
+		return { changed: true, payload: { ...p, system: text } };
+	}
+
+	const messages = p.messages;
+	if (!Array.isArray(messages) || messages.length === 0) {
+		return { changed: false, payload };
+	}
+	const first = messages[0];
+	if (typeof first !== "object" || first === null) {
+		return { changed: false, payload };
+	}
+	const m = first as Record<string, unknown>;
+	if (m.role !== "system" && m.role !== "developer") {
+		return { changed: false, payload };
+	}
+	if (typeof m.content !== "string" || m.content === text) {
+		return { changed: false, payload };
+	}
+	return {
+		changed: true,
+		payload: {
+			...p,
+			messages: [{ ...m, content: text }, ...messages.slice(1)],
+		},
+	};
+}
+
+/** Wire field names a provider payload may carry for the output budget. */
+const MAX_TOKENS_FIELDS = ["max_tokens", "max_completion_tokens"] as const;
+
+/**
+ * Cap the first request's output budget (upstream issue #6: the first
+ * request's `max_tokens` dominates the trajectory anchor). During bootstrap
+ * the field is set to `bootstrapMaxTokens`; after promotion the injected cap
+ * is stripped so the host default returns. A different value is preserved.
+ * Returns the same reference when nothing changed.
+ */
+export function capMaxTokens(
+	payload: Record<string, unknown>,
+	bootstrapMaxTokens: number,
+	promoted: boolean,
+): { changed: boolean; payload: Record<string, unknown> } {
+	const field = MAX_TOKENS_FIELDS.find((f) => typeof payload[f] === "number");
+	if (!field) return { changed: false, payload };
+	if (promoted) {
+		if (payload[field] === bootstrapMaxTokens) {
+			const { [field]: _injected, ...rest } = payload;
+			return { changed: true, payload: rest };
+		}
+		return { changed: false, payload };
+	}
+	if (payload[field] === bootstrapMaxTokens)
+		return { changed: false, payload };
+	return {
+		changed: true,
+		payload: { ...payload, [field]: bootstrapMaxTokens },
+	};
+}
+
 export type BootstrapMode = "two-tool" | "zero";
 
 export function isBootstrapMode(value: unknown): value is BootstrapMode {
 	return value === "two-tool" || value === "zero";
+}
+
+/** True for a positive safe integer (bootstrapMaxTokens validation). */
+export function isPositiveInt(value: unknown): value is number {
+	return (
+		typeof value === "number" && Number.isSafeInteger(value) && value > 0
+	);
 }
 
 /** Resolved extension configuration. */
@@ -294,6 +398,8 @@ export interface Config {
 	bootstrapMode: BootstrapMode;
 	promoteOn: PromoteOn;
 	anchorText: string;
+	minimalSystemPrompt: boolean;
+	bootstrapMaxTokens: number;
 }
 
 /** Raw `anchoredTools` block as read from the host settings file. */
@@ -305,6 +411,8 @@ export interface RawConfig {
 	bootstrapMode?: unknown;
 	promoteOn?: unknown;
 	anchorText?: string;
+	minimalSystemPrompt?: boolean;
+	bootstrapMaxTokens?: number;
 }
 
 /** Fixed anchor text from upstream zero-anchored-standard (config-overridable). */
@@ -319,6 +427,8 @@ export const DEFAULTS: Config = {
 	bootstrapMode: "two-tool",
 	promoteOn: "either",
 	anchorText: ANCHOR_TEXT,
+	minimalSystemPrompt: true,
+	bootstrapMaxTokens: 1024,
 };
 
 /**
@@ -361,5 +471,10 @@ export function applyDefaults(raw: RawConfig): Config {
 			typeof raw.anchorText === "string" && raw.anchorText.length > 0
 				? raw.anchorText
 				: DEFAULTS.anchorText,
+		minimalSystemPrompt:
+			raw.minimalSystemPrompt ?? DEFAULTS.minimalSystemPrompt,
+		bootstrapMaxTokens: isPositiveInt(raw.bootstrapMaxTokens)
+			? raw.bootstrapMaxTokens
+			: DEFAULTS.bootstrapMaxTokens,
 	};
 }

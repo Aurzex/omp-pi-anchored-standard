@@ -5,17 +5,21 @@ import {
 	anchorContent,
 	anchorPayloadMessages,
 	applyDefaults,
+	capMaxTokens,
 	deepMerge,
 	extractRaw,
 	filterTools,
 	hasAssistantMessage,
 	hasToolCallHistory,
+	isPositiveInt,
 	isPromoted,
 	isSubagentSession,
 	lastUserIndex,
 	matchGlob,
+	MINIMAL_SYSTEM_PROMPT,
 	modelMatches,
 	resolveBootstrap,
+	rewriteSystemPrompt,
 	toolName,
 	zeroAnchorPayload,
 } from "../src/core.ts";
@@ -396,6 +400,8 @@ describe("applyDefaults", () => {
 		bootstrapMode: "two-tool",
 		promoteOn: "either",
 		anchorText: ANCHOR_TEXT,
+		minimalSystemPrompt: true,
+		bootstrapMaxTokens: 1024,
 	};
 
 	test("empty raw config resolves to DEFAULTS", () => {
@@ -426,6 +432,8 @@ describe("applyDefaults", () => {
 			bootstrapMode: "zero",
 			promoteOn: "tool-call",
 			anchorText: "custom",
+			minimalSystemPrompt: false,
+			bootstrapMaxTokens: 4096,
 		});
 		assert.deepStrictEqual(cfg, {
 			enabled: false,
@@ -435,6 +443,8 @@ describe("applyDefaults", () => {
 			bootstrapMode: "zero",
 			promoteOn: "tool-call",
 			anchorText: "custom",
+			minimalSystemPrompt: false,
+			bootstrapMaxTokens: 4096,
 		});
 	});
 	test("invalid bootstrapMode and promoteOn normalize to defaults", () => {
@@ -444,6 +454,25 @@ describe("applyDefaults", () => {
 		});
 		assert.equal(cfg.bootstrapMode, "two-tool");
 		assert.equal(cfg.promoteOn, "either");
+	});
+	test("invalid bootstrapMaxTokens normalizes to the default", () => {
+		assert.equal(
+			applyDefaults({ bootstrapMaxTokens: 0 }).bootstrapMaxTokens,
+			1024,
+		);
+		assert.equal(
+			applyDefaults({ bootstrapMaxTokens: -1 }).bootstrapMaxTokens,
+			1024,
+		);
+		assert.equal(
+			applyDefaults({ bootstrapMaxTokens: 1.5 }).bootstrapMaxTokens,
+			1024,
+		);
+		assert.equal(
+			applyDefaults({ bootstrapMaxTokens: "1024" as unknown as number })
+				.bootstrapMaxTokens,
+			1024,
+		);
 	});
 	test("empty anchorText falls back to the default anchor", () => {
 		assert.equal(applyDefaults({ anchorText: "" }).anchorText, ANCHOR_TEXT);
@@ -543,5 +572,152 @@ describe("zeroAnchorPayload", () => {
 		);
 		assert.equal(anchored, false);
 		assert.equal(out, undefined);
+	});
+});
+
+describe("rewriteSystemPrompt", () => {
+	test("exports the byte-identical DSH minimal persona", () => {
+		assert.equal(
+			MINIMAL_SYSTEM_PROMPT,
+			"You are a helpful software engineer assistant.",
+		);
+	});
+	test("rewrites an Anthropic-style top-level system string", () => {
+		const { changed, payload } = rewriteSystemPrompt(
+			{ system: "host prompt", model: "x" },
+			MINIMAL_SYSTEM_PROMPT,
+		);
+		assert.equal(changed, true);
+		assert.deepStrictEqual(payload, {
+			system: MINIMAL_SYSTEM_PROMPT,
+			model: "x",
+		});
+	});
+	test("rewrites an OpenAI-style leading system message", () => {
+		const { changed, payload } = rewriteSystemPrompt(
+			{
+				messages: [
+					{ role: "system", content: "host prompt" },
+					{ role: "user", content: "hi" },
+				],
+			},
+			MINIMAL_SYSTEM_PROMPT,
+		);
+		assert.equal(changed, true);
+		assert.deepStrictEqual(payload, {
+			messages: [
+				{ role: "system", content: MINIMAL_SYSTEM_PROMPT },
+				{ role: "user", content: "hi" },
+			],
+		});
+	});
+	test("rewrites a leading developer message", () => {
+		const { changed } = rewriteSystemPrompt(
+			{ messages: [{ role: "developer", content: "host" }] },
+			MINIMAL_SYSTEM_PROMPT,
+		);
+		assert.equal(changed, true);
+	});
+	test("is a no-op when the persona is already present", () => {
+		assert.equal(
+			rewriteSystemPrompt(
+				{ system: MINIMAL_SYSTEM_PROMPT },
+				MINIMAL_SYSTEM_PROMPT,
+			).changed,
+			false,
+		);
+		assert.equal(
+			rewriteSystemPrompt(
+				{
+					messages: [
+						{ role: "system", content: MINIMAL_SYSTEM_PROMPT },
+					],
+				},
+				MINIMAL_SYSTEM_PROMPT,
+			).changed,
+			false,
+		);
+	});
+	test("leaves non-object and non-system payloads untouched", () => {
+		assert.equal(rewriteSystemPrompt(null, "t").changed, false);
+		assert.equal(rewriteSystemPrompt("str", "t").changed, false);
+		assert.equal(
+			rewriteSystemPrompt(
+				{ messages: [{ role: "user", content: "hi" }] },
+				"t",
+			).changed,
+			false,
+		);
+	});
+	test("never touches non-string system content", () => {
+		assert.equal(
+			rewriteSystemPrompt(
+				{ messages: [{ role: "system", content: [{ type: "text" }] }] },
+				"t",
+			).changed,
+			false,
+		);
+	});
+});
+
+describe("capMaxTokens", () => {
+	test("caps max_tokens during bootstrap", () => {
+		const { changed, payload } = capMaxTokens(
+			{ max_tokens: 384000 },
+			1024,
+			false,
+		);
+		assert.equal(changed, true);
+		assert.deepStrictEqual(payload, { max_tokens: 1024 });
+	});
+	test("caps max_completion_tokens during bootstrap", () => {
+		const { changed, payload } = capMaxTokens(
+			{ max_completion_tokens: 64000 },
+			1024,
+			false,
+		);
+		assert.equal(changed, true);
+		assert.deepStrictEqual(payload, { max_completion_tokens: 1024 });
+	});
+	test("is a no-op when the cap is already set", () => {
+		assert.equal(
+			capMaxTokens({ max_tokens: 1024 }, 1024, false).changed,
+			false,
+		);
+	});
+	test("strips the injected cap after promotion", () => {
+		const { changed, payload } = capMaxTokens(
+			{ max_tokens: 1024 },
+			1024,
+			true,
+		);
+		assert.equal(changed, true);
+		assert.deepStrictEqual(payload, {});
+	});
+	test("preserves a different value after promotion", () => {
+		const { changed, payload } = capMaxTokens(
+			{ max_tokens: 4096 },
+			1024,
+			true,
+		);
+		assert.equal(changed, false);
+		assert.deepStrictEqual(payload, { max_tokens: 4096 });
+	});
+	test("no max-token field is untouched", () => {
+		assert.equal(capMaxTokens({ model: "x" }, 1024, false).changed, false);
+	});
+});
+
+describe("isPositiveInt", () => {
+	test("accepts positive safe integers", () => {
+		assert.equal(isPositiveInt(1024), true);
+		assert.equal(isPositiveInt(1), true);
+	});
+	test("rejects non-positive, non-integer, and non-number values", () => {
+		assert.equal(isPositiveInt(0), false);
+		assert.equal(isPositiveInt(-1), false);
+		assert.equal(isPositiveInt(1.5), false);
+		assert.equal(isPositiveInt("1024"), false);
+		assert.equal(isPositiveInt(undefined), false);
 	});
 });

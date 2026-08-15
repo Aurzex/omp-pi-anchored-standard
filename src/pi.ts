@@ -3,20 +3,21 @@
  *
  * Direct adaptation of dbydd/pi-anchored-tool-for-dspro's index.ts, with the
  * config defaults/merge helpers hoisted into src/core.ts for sharing with the
- * omp entry (src/omp.ts), plus the upstream zero-tool anchor mode and the
- * `promoteOn` trigger selector.
+ * omp entry (src/omp.ts), plus the upstream zero-tool anchor mode, the
+ * `promoteOn` trigger selector, the permanent minimal persona, and the
+ * first-request output-budget cap (`bootstrapMaxTokens`).
  *
  * DeepSeek V4 Pro conditions strongly on the API-visible tool catalog: the
  * official Standard/PTC presets scored 91/92 on Project2 while Minimal scored
  * 99/96 — but Minimal only exposes two tools. This extension replicates the
  * two-phase "anchored standard" preset
  * (https://github.com/xiaobright/dsh-anchored-standard):
- *
  *   1. For a configured target model, the FIRST provider request exposes only
  *      the bootstrap catalog (default: `bash` + `read`), or zero tools with a
- *      fixed anchor turn in `bootstrapMode: "zero"`.
+ *      fixed anchor turn in `bootstrapMode: "zero"`, and its output budget is
+ *      capped at `bootstrapMaxTokens` (default 1024).
  *   2. After the session's first durable promotion signal (per `promoteOn`),
- *      every later request exposes the full catalog.
+ *      every later request exposes the full catalog and the normal budget.
  *
  * The phase is derived from session entries, so /resume and /reload preserve
  * it, exactly like the DSH preset derives promotion from durable session
@@ -35,8 +36,9 @@
  *       "bootstrapTools": ["bash", "read"],  // two-tool mode only
  *       "bootstrapMode": "two-tool",         // "two-tool" | "zero"
  *       "promoteOn": "either",               // "tool-call" | "assistant-message" | "either"
+ *       "minimalSystemPrompt": true,         // system prompt → DSH minimal persona (permanent)
+ *       "bootstrapMaxTokens": 1024,          // first-request output-budget cap
  *       "anchorText": "This round is a test. Tools are not open yet; all tools will open next round.",
- *       "notify": true                       // one-time TUI notice on promotion
  *     }
  *   }
  */
@@ -50,14 +52,18 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
 	applyDefaults,
+	capMaxTokens,
 	deepMerge,
 	extractRaw,
 	filterTools,
 	isBootstrapMode,
+	isPositiveInt,
 	isPromoteOn,
 	isPromoted,
 	isSubagentSession,
+	MINIMAL_SYSTEM_PROMPT,
 	modelMatches,
+	rewriteSystemPrompt,
 	toolName,
 	zeroAnchorPayload,
 	type Config,
@@ -108,6 +114,14 @@ function loadConfig(
 			`[${EXT_NAME}] invalid promoteOn ${JSON.stringify(merged.promoteOn)}; using "either"`,
 		);
 	}
+	if (
+		merged.bootstrapMaxTokens !== undefined &&
+		!isPositiveInt(merged.bootstrapMaxTokens)
+	) {
+		warn(
+			`[${EXT_NAME}] invalid bootstrapMaxTokens ${JSON.stringify(merged.bootstrapMaxTokens)}; using 1024`,
+		);
+	}
 	return applyDefaults(merged);
 }
 
@@ -115,6 +129,8 @@ export default function (pi: ExtensionAPI) {
 	// Per-session: was the first request actually anchored (catalog filtered)?
 	const anchoredSessions = new Map<string, boolean>();
 	const notified = new Set<string>();
+	// Sessions that already logged the one-time system-prompt rewrite notice.
+	const spLogged = new Set<string>();
 
 	const isTarget = (
 		model: { id: string; provider: string } | undefined,
@@ -159,19 +175,41 @@ export default function (pi: ExtensionAPI) {
 
 		const entries = ctx.sessionManager.buildContextEntries();
 		const sid = ctx.sessionManager.getSessionId();
+		const promoteTrigger =
+			cfg.bootstrapMode === "zero" ? "assistant-message" : cfg.promoteOn;
+		const promoted = isPromoted(entries, promoteTrigger);
+
+		let payload = event.payload as Record<string, unknown> | undefined;
+		if (!payload || typeof payload !== "object") return;
+		let changed = false;
+
+		// Permanent: the DSH minimal persona replaces the host system prompt
+		// (co-equal trajectory anchor; only the tool catalog promotes).
+		if (cfg.minimalSystemPrompt) {
+			const sp = rewriteSystemPrompt(payload, MINIMAL_SYSTEM_PROMPT);
+			if (sp.changed) {
+				payload = sp.payload as Record<string, unknown>;
+				changed = true;
+				if (sid && !spLogged.has(sid)) {
+					spLogged.add(sid);
+					console.log(
+						`[${EXT_NAME}] ${ctx.model!.provider}/${ctx.model!.id}: system prompt → DSH minimal persona`,
+					);
+				}
+			}
+		}
 
 		if (cfg.bootstrapMode === "zero") {
 			// Subagents keep their full catalog from their very first request.
-			if (isSubagentSession(entries)) return;
+			if (isSubagentSession(entries))
+				return changed ? payload : undefined;
 			// The anchor reply promotes the session (assistant-message trigger).
-			if (isPromoted(entries, "assistant-message")) {
+			if (promoted) {
 				if (sid) maybeNotifyPromoted(sid, ctx.model!.id, cfg, ctx);
-				return;
+				return changed ? payload : undefined;
 			}
-			const payload = event.payload as
-				Record<string, unknown> | undefined;
 			const result = zeroAnchorPayload(payload, cfg.anchorText);
-			if (!result.payload) return;
+			if (!result.payload) return changed ? payload : undefined;
 			if (sid) anchoredSessions.set(sid, true);
 			console.log(
 				`[${EXT_NAME}] anchoring first request for ${ctx.model!.provider}/${ctx.model!.id}: ` +
@@ -181,31 +219,48 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// two-tool mode
-		if (isPromoted(entries, cfg.promoteOn)) {
+		if (promoted) {
 			if (sid) maybeNotifyPromoted(sid, ctx.model!.id, cfg, ctx);
-			return; // already promoted
+			// Strip the injected output-budget cap so the host default returns.
+			const capped = capMaxTokens(payload, cfg.bootstrapMaxTokens, true);
+			if (capped.changed) {
+				payload = capped.payload;
+				changed = true;
+			}
+			return changed ? payload : undefined;
 		}
 
-		const payload = event.payload as { tools?: ToolLike[] };
-		if (!Array.isArray(payload?.tools) || payload.tools.length === 0)
-			return;
+		// First request: cap the output budget before narrowing the catalog.
+		const capped = capMaxTokens(payload, cfg.bootstrapMaxTokens, false);
+		if (capped.changed) {
+			payload = capped.payload;
+			changed = true;
+		}
 
-		const result = filterTools(payload.tools, cfg.bootstrapTools);
+		// Serialized tool catalog; filterTools validates membership by name.
+		const tools = payload.tools as ToolLike[] | undefined;
+		if (!Array.isArray(tools) || tools.length === 0)
+			return changed ? payload : undefined;
+
+		const result = filterTools(tools, cfg.bootstrapTools);
 		if (result.missing.length > 0) {
 			// Configuration error — fail safe, never strip tools silently.
 			console.warn(
 				`[${EXT_NAME}] bootstrap tools missing from catalog: ${result.missing.join(", ")}; skipping filter`,
 			);
-			return;
+			return changed ? payload : undefined;
 		}
-		if (!result.changed) return; // catalog already minimal
+		if (result.changed) {
+			payload = { ...payload, tools: result.tools };
+			changed = true;
+			if (sid) anchoredSessions.set(sid, true);
+			console.log(
+				`[${EXT_NAME}] anchoring first request for ${ctx.model!.provider}/${ctx.model!.id}: ` +
+					`${result.tools.length}/${tools.length} tools (${result.tools.map(toolName).join(", ")})`,
+			);
+		}
 
-		if (sid) anchoredSessions.set(sid, true);
-		console.log(
-			`[${EXT_NAME}] anchoring first request for ${ctx.model!.provider}/${ctx.model!.id}: ` +
-				`${result.tools.length}/${payload.tools.length} tools (${result.tools.map(toolName).join(", ")})`,
-		);
-		return { ...payload, tools: result.tools };
+		return changed ? payload : undefined;
 	});
 
 	pi.on("tool_call", (event, ctx) => {
@@ -223,6 +278,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", () => {
 		anchoredSessions.clear();
 		notified.clear();
+		spLogged.clear();
 	});
 
 	pi.registerCommand("anchored-tools", {
@@ -253,6 +309,8 @@ export default function (pi: ExtensionAPI) {
 				`promote on: ${cfg.promoteOn}`,
 				`target models: ${cfg.models.join(", ") || "(none — no model is anchored)"}`,
 				`bootstrap tools: ${cfg.bootstrapTools.join(", ")}`,
+				`bootstrap max tokens: ${cfg.bootstrapMaxTokens}`,
+				`minimal system prompt: ${cfg.minimalSystemPrompt ? "on (DSH minimal persona)" : "off (host default)"}`,
 				`current model: ${model ? `${model.provider}/${model.id}` : "n/a"}`,
 				`model matched: ${matched ? "yes" : "no"}`,
 				`phase: ${phase}`,

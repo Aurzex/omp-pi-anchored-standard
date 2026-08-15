@@ -21,10 +21,18 @@
  *     the bootstrap phase;
  *   - anchor (zero mode): `context` hook hides the real user message behind
  *     the fixed anchor turn on the first request;
+ *   - persona: `before_agent_start` returns `{ systemPrompt: [...] }` to swap
+ *     the whole system prompt for the permanent DSH minimal persona
+ *     (`minimalSystemPrompt`, default on);
  *   - restore: tool_call / message_end → `setActiveTools(full)` once the
  *     session is promoted, before the next request serializes;
  *   - the phase is derived from durable session entries via
  *     `ctx.sessionManager.getBranch()`, so /resume and /reload preserve it.
+ *
+ * `bootstrapMaxTokens` (first-request output cap) is a pi-only feature: omp
+ * has no native max-token setter and its `before_provider_request` return is
+ * discarded by the openai-completions transport, so this entry only validates
+ * the config value without applying the cap.
  *
  * Config lives under the top-level `anchoredTools` key of omp's settings
  * files: global `~/.omp/agent/config.yml` (or `config.yaml`) is the base, a
@@ -62,9 +70,11 @@ import {
 	deepMerge,
 	extractRaw,
 	isBootstrapMode,
+	isPositiveInt,
 	isPromoteOn,
 	isPromoted,
 	isSubagentSession,
+	MINIMAL_SYSTEM_PROMPT,
 	modelMatches,
 	resolveBootstrap,
 	type Config,
@@ -124,6 +134,14 @@ function loadConfig(
 	if (merged.promoteOn !== undefined && !isPromoteOn(merged.promoteOn)) {
 		logger.warn(
 			`[${EXT_NAME}] invalid promoteOn ${JSON.stringify(merged.promoteOn)}; using "either"`,
+		);
+	}
+	if (
+		merged.bootstrapMaxTokens !== undefined &&
+		!isPositiveInt(merged.bootstrapMaxTokens)
+	) {
+		logger.warn(
+			`[${EXT_NAME}] invalid bootstrapMaxTokens ${JSON.stringify(merged.bootstrapMaxTokens)}; using 1024`,
 		);
 	}
 	return applyDefaults(merged);
@@ -241,7 +259,13 @@ export default function (pi: ExtensionAPI) {
 		await ensureNarrowed(ctx, loadConfig(ctx, logger));
 	});
 	pi.on("before_agent_start", async (event, ctx) => {
-		await ensureNarrowed(ctx, loadConfig(ctx, logger));
+		const cfg = loadConfig(ctx, logger);
+		await ensureNarrowed(ctx, cfg);
+		// Permanent: the DSH minimal persona replaces the whole system prompt
+		// (co-equal trajectory anchor; only the tool catalog promotes).
+		if (cfg.minimalSystemPrompt && isTarget(ctx.model, cfg)) {
+			return { systemPrompt: [MINIMAL_SYSTEM_PROMPT] };
+		}
 	});
 
 	// Restore as soon as the promotion signal lands, before the next request.
@@ -308,6 +332,8 @@ export default function (pi: ExtensionAPI) {
 				`promote on: ${cfg.promoteOn}`,
 				`target models: ${cfg.models.join(", ") || "(none — no model is anchored)"}`,
 				`bootstrap tools: ${cfg.bootstrapTools.join(", ")}`,
+				`bootstrap max tokens: ${cfg.bootstrapMaxTokens}${cfg.bootstrapMode === "two-tool" ? " (pi only)" : ""}`,
+				`minimal system prompt: ${cfg.minimalSystemPrompt ? "on (DSH minimal persona)" : "off (host default)"}`,
 				`current model: ${model ? `${model.provider}/${model.id}` : "n/a"}`,
 				`model matched: ${matched ? "yes" : "no"}`,
 				`phase: ${phase}`,

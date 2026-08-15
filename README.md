@@ -1,8 +1,6 @@
 # omp-pi-anchored-standard
 
-给 **omp**(Oh My Pi)和 **pi**(pi-coding-agent)用的 "anchored standard" 插件:把目标模型的**第一个请求**锚定到最小工具目录,会话记录到**第一个持久提升信号**后恢复完整工具目录。
-
-概念移植自 [`xiaobright/dsh-anchored-standard`](https://github.com/xiaobright/dsh-anchored-standard)(DeepSeek Harness preset,含其 `zero-anchored-standard` 测试模式),pi 侧对应移植 [`dbydd/pi-anchored-tool-for-dspro`](https://github.com/dbydd/pi-anchored-tool-for-dspro)。本项目把它们合成一个包:共享纯逻辑 `src/core.ts` + 两个宿主入口 `src/omp.ts` / `src/pi.ts`,各宿主只加载自己的入口。
+给 **omp**(Oh My Pi)和 **pi**(pi-coding-agent)用的 "anchored standard" 插件:把目标模型的**第一个请求**锚定到最小工具目录 + 小输出预算 + DSH minimal 系统人设,会话记录到**第一个持久提升信号**后恢复完整工具目录与正常预算。
 
 ## 为什么存在
 
@@ -32,8 +30,8 @@ DeepSeek V4 Pro 对 API 可见的工具目录高度敏感。Project2 评测(Deep
 - 非目标模型完全不受影响;`models` 默认空数组 = 谁也不锚定(安全默认)。
 - 两阶段提升决策按会话 id 在进程内记忆,扫描只做一次。
 - **宿主机制不同**(行为一致):omp 侧通过 `pi.setActiveTools()` 原生收窄/恢复活动工具集(`before_provider_request` 的 payload 替换在 openai-completions 传输层被丢弃,不可靠),zero 模式 anchor 消息经 `context` 事件注入(序列化前生效,所有传输层都遵守);pi 侧沿用 pi 移植的 `before_provider_request` payload 过滤(pi 端口已验证有效)。
-
-### `bootstrapMode: "zero"`(上游 zero-anchored-standard)
+- **`minimalSystemPrompt`(默认 `true`)**:目标模型的系统提示被整体改写为 DSH minimal 人设(`You are a helpful software engineer assistant.`,与上游 Harness `minimal` preset 逐字节一致)。这是与工具目录**同级**的轨迹锚点:改写措辞会破坏 `We need` 推理风格,故永久生效(整段会话),只有工具目录提升。设 `false` 保留宿主默认系统提示。omp 经 `before_agent_start` 返回 `systemPrompt` 替换;pi 经 payload 的顶层 `system` / `messages[0]`(role `system`/`developer`)改写。
+- **`bootstrapMaxTokens`(默认 `1024`,仅 pi)**:首请求输出预算封顶(上游 issue #6:首请求 `max_tokens` 主导轨迹锚点——1024 复现 `We need` 风格 26/32 次,而适配器默认 256000 是 0/5)。提升后剥离注入的上限,恢复宿主默认。omp 无原生 max-token 控制且 `before_provider_request` 返回值被 openai-completions 传输层丢弃,故此配置在 omp 侧仅做校验、不生效。
 
 上游新增的实验对比模式:首请求**零工具** + 一条固定 anchor 用户消息(默认 `This round is a test. Tools are not open yet; all tools will open next round.`,可配置),让第一条推理链走零注入轨迹;anchor 回复落库后恢复完整目录。本插件的移植:
 
@@ -44,36 +42,24 @@ DeepSeek V4 Pro 对 API 可见的工具目录高度敏感。Project2 评测(Deep
 
 ## 目录结构
 
-```
+```text
 src/
-  core.ts   # 共享纯逻辑:toolName / deepMerge / matchGlob / modelMatches /
-            # hasToolCallHistory / hasAssistantMessage / isSubagentSession /
-            # isPromoted / filterTools / zeroAnchorPayload / extractRaw / applyDefaults
-  omp.ts    # omp 入口:setActiveTools 收窄/恢复活动工具集 + context 注入 anchor + config.yml(YAML)
+  core.ts   # 共享纯逻辑:toolName / deepMerge / matchGlob / modelMatches / hasToolCallHistory / hasAssistantMessage / isSubagentSession / isPromoted / filterTools / zeroAnchorPayload / rewriteSystemPrompt / capMaxTokens / extractRaw / applyDefaults
+  omp.ts    # omp 入口:setActiveTools 收窄/恢复 + context 注入 anchor + before_agent_start 替换 systemPrompt + config.yml(YAML)
   pi.ts     # pi 入口:before_provider_request + buildContextEntries() + settings.json
 test/
-  core.test.ts   # node:test 单测(62 例)
+  core.test.ts   # node:test 单测(78 例)
 ```
 
 ## 安装
 
+尚未发布到 npm,直接按仓库安装。仓库的 `package.json` 已声明两个宿主的入口(`omp.extensions` / `pi.extensions`),所以只需给出仓库链接,宿主即可自动安装并加载正确入口。
+
 ### omp
 
-方式 A — 拷进用户扩展目录(推荐):
-
 ```sh
-mkdir -p ~/.omp/agent/extensions
-cp -r /path/to/omp-pi-anchored-standard ~/.omp/agent/extensions/omp-pi-anchored-standard
+omp plugin install github:Aurzex/omp-pi-anchored-standard
 ```
-
-方式 B — 在 `~/.omp/agent/config.yml` 里指路径:
-
-```yaml
-extensions:
-    - /path/to/omp-pi-anchored-standard
-```
-
-方式 C — 单次加载:`omp --extension /path/to/omp-pi-anchored-standard/src/omp.ts`
 
 然后配置(全局 `~/.omp/agent/config.yml`,或某项目的 `<项目>/.omp/config.yml`):
 
@@ -87,6 +73,8 @@ anchoredTools:
         - bash
         - read # two-tool 模式专用
     promoteOn: either # "tool-call" | "assistant-message" | "either"
+    minimalSystemPrompt: true # 系统提示 → DSH minimal 人设(永久)
+    bootstrapMaxTokens: 1024 # 首请求输出预算上限(仅 pi 生效)
     notify: true # 提升时一次性 TUI 通知
 ```
 
@@ -94,16 +82,13 @@ anchoredTools:
 
 ### pi
 
-三选一(参考 pi 移植的官方方式):
+在 `~/.pi/agent/settings.json` 的 `packages` 里加仓库链接,`/reload` 后自动安装:
 
-```sh
-pi install omp-pi-anchored-standard          # 发布到 npm 后
-# 或 ~/.pi/agent/settings.json:
-#   { "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.2.0"] }
-# 或把 src/ 拷到 ~/.pi/agent/extensions/anchored-tools/
+```jsonc
+{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@main"] }
 ```
 
-配置在 pi 的 `settings.json`(`~/.pi/agent/settings.json` 全局 + 可信项目的 `.pi/settings.json` 覆盖,语义同上):
+然后配置(全局 `~/.pi/agent/settings.json` + 可信项目的 `.pi/settings.json` 覆盖,语义同上):
 
 ```jsonc
 {
@@ -113,6 +98,8 @@ pi install omp-pi-anchored-standard          # 发布到 npm 后
 		"bootstrapMode": "two-tool",
 		"bootstrapTools": ["bash", "read"],
 		"promoteOn": "either",
+		"minimalSystemPrompt": true,
+		"bootstrapMaxTokens": 1024,
 		"anchorText": "This round is a test. Tools are not open yet; all tools will open next round.",
 		"notify": true,
 	},
@@ -121,15 +108,18 @@ pi install omp-pi-anchored-standard          # 发布到 npm 后
 
 改完 `/reload`。
 
+> 想锁到某个版本:先 push tag,再把 pi 的 `@main` 换成 `@v0.3.0`、omp 的 `github:Aurzex/omp-pi-anchored-standard` 换成 `github:Aurzex/omp-pi-anchored-standard#v0.3.0`。当前仓库无 tag,故用默认分支 `main`。
+
 ## 验证
 
 会话里跑 `/anchored-tools`,报告当前模型、是否命中目标、模式、提升触发器、当前阶段(`bootstrap` / `promoted (full catalog)` / `not-targeted` / `disabled`)。
 
-首次锚定会打日志(omp 走 `pi.logger`,pi 走 console):
+首次锚定与系统提示改写会打日志(omp 走 `pi.logger`,pi 走 console):
 
 ```
 [anchored-tools] anchoring first request for deepseek/deepseek-v4-flash: 2/25 tools (bash, read)   # two-tool
 [anchored-tools] anchoring first request for deepseek/deepseek-v4-flash: 0 tools (zero-tool anchor) # zero
+[anchored-tools] deepseek/deepseek-v4-flash: system prompt → DSH minimal persona                     # minimalSystemPrompt
 ```
 
 ## 开发
@@ -146,6 +136,7 @@ npm test            # node --test(原生 TS,无需 bun;bun 环境同样可跑 no
 - omp 的 `before_provider_request` payload 替换对 openai-completions 传输(deepseek 等)无效(上游丢弃返回值),故 omp 入口不依赖它。
 - `bootstrapMode: "zero"` 的 anchor 轮结束需用户继续一句(真实消息不自动推迟),见上文差异说明。
 - pi 侧无 `session_init` 条目,zero 模式的子代理豁免仅 omp 生效。
+- `bootstrapMaxTokens` 仅 pi 生效:omp 无原生 max-token setter,且其 `before_provider_request` 返回值被 openai-completions 传输层丢弃(见上),故 omp 只校验该配置、不施加输出预算封顶。
 - `models` 必须在配置里显式列出目标模型;默认空数组不锚定任何模型。
 
 ## License
