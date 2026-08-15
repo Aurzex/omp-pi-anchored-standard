@@ -1,6 +1,6 @@
 {
 	"name": "omp-pi-anchored-standard",
-	"version": "0.8.0",
+	"version": "0.8.1",
 	"description": "Anchored tool catalog for omp and pi: first request exposes a task-routed bootstrap catalog (default deepseek-v4-pro), a capped output budget, and the DSH minimal/route persona; full catalog + normal budget after the first durable promotion signal. Port of xiaobright/dsh-anchored-standard via dbydd/pi-anchored-tool-for-dspro, with dsh-router-standard task routing.",
 	"type": "module",
 	"license": "MIT",
