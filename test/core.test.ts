@@ -532,7 +532,7 @@ describe("applyDefaults", () => {
 		anchorText: ANCHOR_TEXT,
 		minimalSystemPrompt: true,
 		bootstrapMaxTokens: 1024,
-		taskRouting: true,
+		taskRouting: false,
 	};
 
 	test("empty raw config resolves to DEFAULTS", () => {

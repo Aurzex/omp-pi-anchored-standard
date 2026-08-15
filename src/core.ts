@@ -650,7 +650,7 @@ export const DEFAULTS: Config = {
 	anchorText: ANCHOR_TEXT,
 	minimalSystemPrompt: true,
 	bootstrapMaxTokens: 1024,
-	taskRouting: true,
+	taskRouting: false,
 };
 
 /**
