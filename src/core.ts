@@ -141,6 +141,18 @@ export function isFlashModel(modelId: string): boolean {
 	return typeof modelId === "string" && /flash/i.test(modelId);
 }
 
+/**
+ * Task mode used by the task-aware router for a concrete model route.
+ * Flash-family models always route `weak`: the measured optimum for Flash is
+ * the static w7 persona + classify/recall/anti-runaway/deep-think anchors
+ * (v4-flash-godmode-opencode-go, adapted from dsh-router-standard P11/P23),
+ * and keyword evidence is noisier than the model-specific weak persona there.
+ * Other models use the keyword classifier.
+ */
+export function routeTaskMode(text: string, modelId: string): TaskMode {
+	return isFlashModel(modelId) ? "weak" : classifyTask(text);
+}
+
 function contentToText(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
@@ -519,7 +531,13 @@ export const WEAK_PRO_PERSONA =
 	"\nBefore acting, decide the task type (build or fix) and adopt the matching " +
 	"style: build → hands-on production; fix → inspect-and-plan.";
 
-/** Weak internal-routing persona for Flash-family models (dsh-router-standard w7). */
+/**
+ * Weak internal-routing persona for Flash-family models (dsh-router-standard
+ * w7 + v4-flash-godmode-opencode-go static anchors). The deep-think /
+ * decision-closure anchor is merged into the persona because omp/pi have no
+ * DSH-style per-message inbox, so near-field guidance must be static — the
+ * same adaptation the opencode-go Flash preset makes.
+ */
 export const WEAK_FLASH_PERSONA =
 	"You are a helpful assistant.\n" +
 	"Before acting, decide the task type (build or fix) and adopt the matching " +
@@ -527,7 +545,11 @@ export const WEAK_FLASH_PERSONA =
 	"Before acting, briefly review what you have already done in this session " +
 	"and continue from where you left off; do not repeat completed steps. Do not " +
 	"run environment checks (echo, whoami, uname, node --version, date) or " +
-	"exhaustive grep/glob scans.";
+	"exhaustive grep/glob scans.\n" +
+	"Think deeply about the architecture, edge cases, and integration points " +
+	"before writing. Do not spend reasoning on the environment or tooling. " +
+	"Produce when your information is complete, and end each reasoning block " +
+	"with a decision or an information need.";
 
 /** Model-specific optimum persona for a classified task mode. */
 export function routerPersonaFor(mode: TaskMode, modelId: string): string {
@@ -560,13 +582,47 @@ export function routerBootstrapTools(mode: TaskMode): string[] {
 	}
 }
 
+/**
+ * The platform shell present in the catalog, preferring `pwsh` (the measured
+ * Windows-native optimum in dsh-router-standard's router-bootstrap) over
+ * `bash`. Returns undefined when the catalog has neither.
+ */
+export function platformShell(available: string[]): string | undefined {
+	return (
+		available.find((n) => n === "pwsh") ??
+		available.find((n) => n === "bash")
+	);
+}
+
 /** Add the platform shell (`bash` or `pwsh`) to a bootstrap tool list. */
 export function withPlatformShell(
 	tools: string[],
 	available: string[],
 ): string[] {
-	const shell = available.find((n) => n === "bash" || n === "pwsh");
+	const shell = platformShell(available);
 	return shell ? [...tools, shell] : tools;
+}
+
+/**
+ * Replace configured `bash`/`pwsh` entries with the platform shell that is
+ * actually present, preserving order and deduplicating. Keeps the configured
+ * bootstrap set portable across Linux/macOS/Windows catalogs.
+ */
+export function normalizeShellTools(
+	tools: string[],
+	available: string[],
+): string[] {
+	const shell = platformShell(available);
+	if (!shell) return tools;
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const tool of tools) {
+		const name = tool === "bash" || tool === "pwsh" ? shell : tool;
+		if (seen.has(name)) continue;
+		seen.add(name);
+		out.push(name);
+	}
+	return out;
 }
 
 /**
@@ -591,7 +647,10 @@ export function selectBootstrapTools(
 			return { tools: routerResolved.tools, missing: [], used: "router" };
 		}
 	}
-	const configured = resolveBootstrap(available, cfg.bootstrapTools);
+	const configured = resolveBootstrap(
+		available,
+		normalizeShellTools(cfg.bootstrapTools, available),
+	);
 	return {
 		tools: configured.tools,
 		missing: configured.missing,
@@ -805,7 +864,7 @@ export const ANCHOR_TEXT =
 export const DEFAULTS: Config = {
 	enabled: true,
 	models: ["deepseek-v4-pro"],
-	bootstrapTools: ["bash", "read"],
+	bootstrapTools: ["bash", "edit"],
 	notify: true,
 	bootstrapMode: "two-tool",
 	promoteOn: "either",

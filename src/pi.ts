@@ -54,7 +54,7 @@ import {
 	addTrajectory,
 	applyDefaults,
 	capMaxTokens,
-	classifyTask,
+	routeTaskMode,
 	countTrajectory,
 	deepMerge,
 	extractRaw,
@@ -182,7 +182,10 @@ export default function (pi: ExtensionAPI) {
 
 		const payloadMessages =
 			(payload.messages as PayloadMessage[] | undefined) ?? [];
-		const taskMode = classifyTask(taskTextFromMessages(payloadMessages));
+		const taskMode = routeTaskMode(
+			taskTextFromMessages(payloadMessages),
+			ctx.model!.id,
+		);
 
 		// The DSH persona replaces the host system prompt permanently (only
 		// the tool catalog promotes). Task routing picks the measured optimum
@@ -339,7 +342,10 @@ export default function (pi: ExtensionAPI) {
 			const matched = isTargetModel(cfg, model);
 			const entries = ctx.sessionManager.buildContextEntries();
 			const promoted = isPromoted(entries, promoteTrigger(cfg));
-			const taskMode = classifyTask(taskTextFromEntries(entries));
+			const taskMode = routeTaskMode(
+				taskTextFromEntries(entries),
+				model?.id ?? "",
+			);
 			const phase = !cfg.enabled
 				? "disabled"
 				: !matched

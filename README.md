@@ -31,8 +31,9 @@ DeepSeek V4 Pro 对 API 可见的工具目录高度敏感。Project2 评测(Deep
 - 两阶段提升决策按会话 id 在进程内记忆,扫描只做一次。
 - **宿主机制不同**(行为一致):omp 侧通过 `pi.setActiveTools()` 原生收窄/恢复活动工具集(`before_provider_request` 的 payload 替换在 openai-completions 传输层被丢弃,不可靠),zero 模式 anchor 消息经 `context` 事件注入(序列化前生效,所有传输层都遵守);pi 侧沿用 pi 移植的 `before_provider_request` payload 过滤(pi 端口已验证有效)。
 - **`minimalSystemPrompt`(默认 `true`)**:目标模型的系统提示被整体改写为 DSH minimal 人设(`You are a helpful software engineer assistant.`,与上游 Harness `minimal` preset 逐字节一致)。这是与工具目录**同级**的轨迹锚点:改写措辞会破坏 `We need` 推理风格,故永久生效(整段会话),只有工具目录提升。设 `false` 保留宿主默认系统提示。omp 经 `before_agent_start` 返回 `systemPrompt` 替换;pi 经 payload 的顶层 `system` / `messages[0]`(role `system`/`developer`)改写。
+- **默认 bootstrap 工具对 `["bash", "edit"]`**:上游 dsh-anchored-standard 实测的 Minimal 工具 schema 是持久 `bash` + `str_replace_editor`(issue #11:该 schema 在适配器默认 maxTokens 下 5/5 锚定 `We need`,`bash`/`read` 等 standard 族 schema 11/11 失败)。omp/pi 工具目录没有 `str_replace_editor`,故默认使用宿主等价对 `bash` + `edit`(单文件精确替换编辑器,即 shell + 编辑器);若目录里存在 `str_replace_editor`(例如 DSH 方言),可显式配置 `["bash", "str_replace_editor"]`。`bash`/`pwsh` 条目会按目录里实际存在的平台 shell 归一化(`pwsh` 优先,对齐上游 router-bootstrap)。
 - **`bootstrapMaxTokens`(默认不封顶,仅 pi)**:可选的首请求输出预算封顶。上游 issue #11 实测:Minimal 工具 schema 在适配器默认 maxTokens(256000)下**无需封顶**即可锚定 `We need` 轨迹(5/5),而封顶的送达依赖 profile package 的 `prepareCall` 行为(rc.5 源码可达请求,rc.6 预构建包会被 `adapterDefaults.maxTokens` 覆盖)。故默认不封顶(opt-in);配置后才封顶,提升后剥离注入的上限。omp 无原生 max-token 控制且 `before_provider_request` 返回值被 openai-completions 传输层丢弃,故此配置在 omp 侧仅做校验、不生效。
-- **`taskRouting`(默认 `false`,仅 `two-tool` 模式)**:参考 [dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite) / dsh-router-standard 的实测路由(Pro 按任务选 persona;Flash 用 neutral + classify)。首轮前从会话第一条用户消息分类任务:`react`(新建/开发)→ doer persona + 写优先工具(`read`/`write`/`edit`);`spec`(修复/维护)→ DSH minimal persona + 读优先工具(`read`/`edit`/`glob`/`grep`);`weak`(模糊/无关键词)→ 模型自分类 persona(w6c/w7)+ 写优先工具。路由工具缺失时回退到 `bootstrapTools`,再缺失才 fail-safe。默认 `false` 走纯 anchored-standard(固定 DSH minimal persona + `bootstrapTools`),实测稳定复现 `We need` 风格;设 `true` 启用任务感知路由。
+- **`taskRouting`(默认 `false`,仅 `two-tool` 模式)**:参考 [dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite) / dsh-router-standard 的实测路由。首轮前从会话第一条用户消息分类任务:`react`(新建/开发)→ doer persona + 写优先工具(`read`/`write`/`edit`);`spec`(修复/维护)→ DSH minimal persona + 读优先工具(`read`/`edit`/`glob`/`grep`);`weak`(模糊/无关键词)→ 模型自分类 persona(w6c/w7)+ 写优先工具。**Flash 模型一律强制 `weak`**(w7 + 静态深度思考/决策闭环锚,参考 [v4-flash-godmode-opencode-go](https://github.com/SheberDavid/v4-flash-godmode-opencode-go):omp/pi 无 DSH 式 per-message inbox,近场引导必须静态并入 persona)。路由工具缺失时回退到 `bootstrapTools`,再缺失才 fail-safe。默认 `false` 走纯 anchored-standard(固定 DSH minimal persona + `bootstrapTools`),实测稳定复现 `We need` 风格;设 `true` 启用任务感知路由。
 - **首请求上下文剥离**(仅 `minimalSystemPrompt` 开启):首请求消息被重建为 `[system(DSH minimal), 最后一条 user]`,自动注入的 AGENTS.md / skill-catalog / workspace 摘要一律不进首请求——上游 `suppressedContextSources`(issue #11)的 omp/pi 等价实现(omp/pi 消息无 `source.kind`,故按「只保留 system + user」重建,而非按来源过滤)。含 assistant/toolResult 的多轮历史不重建。
 
 上游新增的实验对比模式:首请求**零工具** + 一条固定 anchor 用户消息(默认 `This round is a test. Tools are not open yet; all tools will open next round.`,可配置),让第一条推理链走零注入轨迹;anchor 回复落库后恢复完整目录。本插件的移植:
@@ -55,7 +56,7 @@ test/
 
 ## 安装
 
-已发布到 npm(`omp-pi-anchored-standard@0.6.1`)。仓库的 `package.json` 也声明了两个宿主的入口(`omp.extensions` / `pi.extensions`),npm 与 git 安装都会自动加载正确入口。
+已发布到 npm(`omp-pi-anchored-standard@0.7.0`)。仓库的 `package.json` 也声明了两个宿主的入口(`omp.extensions` / `pi.extensions`),npm 与 git 安装都会自动加载正确入口。
 
 ### omp
 
@@ -88,7 +89,7 @@ anchoredTools:
     bootstrapMode: two-tool # "two-tool" | "zero"
     bootstrapTools:
         - bash
-        - read # taskRouting 关闭或路由工具缺失时的回退集
+        - edit # 默认 shell+编辑器对(等价 DSH Minimal 的 bash+str_replace_editor)
     promoteOn: either # "tool-call" | "assistant-message" | "either"
     minimalSystemPrompt: true # 系统提示 → DSH/route persona(永久)
     taskRouting: false # 默认,纯 anchored-standard(稳定 `We need`);true = 任务感知路由
@@ -109,7 +110,7 @@ pi install omp-pi-anchored-standard
 或把仓库加进 `~/.pi/agent/settings.json` 的 `packages`,`/reload` 后自动安装:
 
 ```jsonc
-{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.6.1"] }
+{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.7.0"] }
 ```
 
 默认配置即可用(自动锚定 `deepseek-v4-pro`,纯 anchored-standard;`taskRouting` 默认关闭)。如需覆盖,在全局 `~/.pi/agent/settings.json` + 可信项目的 `.pi/settings.json` 配置(语义同上):
@@ -120,7 +121,7 @@ pi install omp-pi-anchored-standard
 		"enabled": true,
 		"models": ["deepseek-v4-pro"],
 		"bootstrapMode": "two-tool",
-		"bootstrapTools": ["bash", "read"],
+		"bootstrapTools": ["bash", "edit"],
 		"promoteOn": "either",
 		"minimalSystemPrompt": true,
 		"taskRouting": false,
@@ -133,7 +134,7 @@ pi install omp-pi-anchored-standard
 
 改完 `/reload`。
 
-> 版本锁:git 安装可用 `@v0.6.1`(pi)/ `#v0.6.1`(omp);npm 安装默认就是 `latest`(`0.6.1`)。
+> 版本锁:git 安装可用 `@v0.7.0`(pi)/ `#v0.7.0`(omp);npm 安装默认就是 `latest`(`0.7.0`)。
 
 ## 验证
 
@@ -166,6 +167,22 @@ npm test            # node --test(原生 TS,无需 bun;bun 环境同样可跑 no
 - `models` 默认 `["deepseek-v4-pro"]`;显式配置 `[]` 可关闭锚定,不再要求用户必须配置目标模型。
 - 上游 `suppressedContextSources`(issue #11:首请求剥离自动注入的 AGENTS.md / skill-catalog 上下文)已通过**消息重建**移植:omp/pi 消息无 `source.kind`,故首请求直接重建为 `[system, user]`,自动注入上下文一律丢弃;多轮历史跳过。
 
+## 参考实现
+
+本插件是以下上游实测 preset 的 omp/pi 移植,默认零配置覆盖官方 API 与 opencode-go 两条路径:
+
+| 路径        | Flash                                                                                       | Pro                                                                          |
+| ----------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| 官方 API    | [dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite)(dsh-router-standard)    | [dsh-anchored-standard](https://github.com/xiaobright/dsh-anchored-standard) |
+| opencode-go | [v4-flash-godmode-opencode-go](https://github.com/SheberDavid/v4-flash-godmode-opencode-go) | [myDshPresets](https://github.com/0liveiraaa/myDshPresets)                   |
+
+采纳要点:
+
+- `bootstrapTools` 默认 `["bash", "edit"]`:dsh-anchored-standard 实测 Minimal schema 是 `bash` + `str_replace_editor`;omp/pi 无 `str_replace_editor`,用宿主单文件精确替换编辑器 `edit` 等价替代。
+- `taskRouting` 下 Flash 一律 `weak` 并静态并入 w7 深度思考/决策闭环锚(v4-flash-godmode 对 opencode-go 的适配;omp/pi 同样无 DSH 式 per-message inbox,动态近场引导不可用)。
+- 平台 shell 选择 `pwsh` 优先(dsh-router-standard router-bootstrap)。
+- zero 模式与首请求上下文剥离对应 dsh-anchored-standard 的 zero-anchored-standard 与 `suppressedContextSources`(issue #11);myDshPresets 的 warmup 轮思路与 zero 模式同源。
+
 ## License
 
-MIT。概念移植自 [`xiaobright/dsh-anchored-standard`](https://github.com/xiaobright/dsh-anchored-standard)(MIT,本身派生自 DeepSeek Harness Standard preset)与 [`dbydd/pi-anchored-tool-for-dspro`](https://github.com/dbydd/pi-anchored-tool-for-dspro)(MIT)。与 DeepSeek / pi 项目无关联,未经其背书。
+MIT。概念移植自 [`xiaobright/dsh-anchored-standard`](https://github.com/xiaobright/dsh-anchored-standard)(MIT,本身派生自 DeepSeek Harness Standard preset)、[`yjh051108/dsh-routing-suite`](https://github.com/yjh051108/dsh-routing-suite)(MIT)、[`SheberDavid/v4-flash-godmode-opencode-go`](https://github.com/SheberDavid/v4-flash-godmode-opencode-go)(MIT)与 [`dbydd/pi-anchored-tool-for-dspro`](https://github.com/dbydd/pi-anchored-tool-for-dspro)(MIT)。与 DeepSeek / pi 项目无关联,未经其背书。

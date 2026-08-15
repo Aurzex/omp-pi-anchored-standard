@@ -25,10 +25,13 @@ import {
 	MINIMAL_SYSTEM_PROMPT,
 	modelMatches,
 	promoteTrigger,
+	normalizeShellTools,
 	resolveBootstrap,
 	rewriteSystemPrompt,
-	routerBootstrapTools,
+	platformShell,
 	routerPersonaFor,
+	routeTaskMode,
+	routerBootstrapTools,
 	selectBootstrapTools,
 	SessionPromotionMemo,
 	shouldRestoreFullCatalog,
@@ -608,7 +611,7 @@ describe("applyDefaults", () => {
 	const fullDefaults = {
 		enabled: true,
 		models: ["deepseek-v4-pro"],
-		bootstrapTools: ["bash", "read"],
+		bootstrapTools: ["bash", "edit"],
 		notify: true,
 		bootstrapMode: "two-tool",
 		promoteOn: "either",
@@ -630,7 +633,7 @@ describe("applyDefaults", () => {
 	test("empty bootstrapTools falls back to the default list", () => {
 		assert.deepStrictEqual(
 			applyDefaults({ bootstrapTools: [] }).bootstrapTools,
-			["bash", "read"],
+			["bash", "edit"],
 		);
 	});
 	test("scalars default when missing", () => {
@@ -752,6 +755,7 @@ describe("task routing helpers", () => {
 		assert.ok(pro.includes(MINIMAL_SYSTEM_PROMPT));
 		assert.ok(!pro.includes("review what you have already done"));
 		assert.ok(flash.includes("review what you have already done"));
+		assert.ok(flash.includes("Think deeply"));
 		assert.notEqual(pro, flash);
 	});
 
@@ -812,14 +816,55 @@ describe("task routing helpers", () => {
 		assert.deepStrictEqual(selected.tools, ["bash"]);
 	});
 
-	test("selectBootstrapTools: reports missing configured tools when routing falls back and fails", () => {
+	test("selectBootstrapTools: reports missing non-shell configured tools when routing falls back and fails", () => {
 		const selected = selectBootstrapTools(
-			{ bootstrapTools: ["bash", "pwsh"], taskRouting: true },
+			{
+				bootstrapTools: ["bash", "str_replace_editor"],
+				taskRouting: true,
+			},
 			"spec",
 			["bash", "read"],
 		);
 		assert.equal(selected.used, "configured");
-		assert.deepStrictEqual(selected.missing, ["pwsh"]);
+		assert.deepStrictEqual(selected.missing, ["str_replace_editor"]);
+	});
+
+	test("selectBootstrapTools: configured shell entries normalize to the platform shell", () => {
+		const selected = selectBootstrapTools(
+			{ bootstrapTools: ["bash", "edit"], taskRouting: false },
+			"weak",
+			["pwsh", "edit", "read"],
+		);
+		assert.equal(selected.used, "configured");
+		assert.deepStrictEqual(selected.tools, ["pwsh", "edit"]);
+		assert.deepStrictEqual(selected.missing, []);
+	});
+
+	test("routeTaskMode: Flash always routes weak, others use keywords", () => {
+		assert.equal(
+			routeTaskMode("开发一个游戏", "deepseek-v4-flash"),
+			"weak",
+		);
+		assert.equal(
+			routeTaskMode("修复这个 bug", "deepseek-v4-flash"),
+			"weak",
+		);
+		assert.equal(routeTaskMode("开发一个游戏", "deepseek-v4-pro"), "react");
+		assert.equal(routeTaskMode("修复这个 bug", "deepseek-v4-pro"), "spec");
+	});
+
+	test("platformShell / normalizeShellTools prefer pwsh over bash", () => {
+		assert.equal(platformShell(["bash", "pwsh"]), "pwsh");
+		assert.equal(platformShell(["bash"]), "bash");
+		assert.equal(platformShell(["read"]), undefined);
+		assert.deepStrictEqual(
+			normalizeShellTools(["bash", "edit"], ["pwsh", "edit"]),
+			["pwsh", "edit"],
+		);
+		assert.deepStrictEqual(
+			normalizeShellTools(["bash", "pwsh", "edit"], ["pwsh", "edit"]),
+			["pwsh", "edit"],
+		);
 	});
 
 	test("taskTextFromEntries extracts the first user message text", () => {

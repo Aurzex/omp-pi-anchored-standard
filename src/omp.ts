@@ -68,7 +68,7 @@ import {
 	addTrajectory,
 	anchorPayloadMessages,
 	applyDefaults,
-	classifyTask,
+	routeTaskMode,
 	countTrajectory,
 	deepMerge,
 	extractRaw,
@@ -222,7 +222,7 @@ export default function (pi: ExtensionAPI) {
 			const taskText = prompt?.trim()
 				? prompt
 				: taskTextFromEntries(branch);
-			mode = classifyTask(taskText);
+			mode = routeTaskMode(taskText, ctx.model!.id);
 			// Task routing needs real task text. Without it, fall back to the
 			// configured bootstrap set instead of exposing the full catalog.
 			const routingCfg =
@@ -305,7 +305,10 @@ export default function (pi: ExtensionAPI) {
 				cfg.taskRouting &&
 				cfg.bootstrapMode === "two-tool" &&
 				taskText.trim()
-					? routerPersonaFor(classifyTask(taskText), ctx.model!.id)
+					? routerPersonaFor(
+							routeTaskMode(taskText, ctx.model!.id),
+							ctx.model!.id,
+						)
 					: MINIMAL_SYSTEM_PROMPT;
 			return { systemPrompt: [persona] };
 		}
@@ -382,7 +385,10 @@ export default function (pi: ExtensionAPI) {
 			const matched = isTargetModel(cfg, model);
 			const entries = ctx.sessionManager.getBranch();
 			const promoted = isPromoted(entries, promoteTrigger(cfg));
-			const taskMode = classifyTask(taskTextFromEntries(entries));
+			const taskMode = routeTaskMode(
+				taskTextFromEntries(entries),
+				model?.id ?? "",
+			);
 			const selected =
 				cfg.bootstrapMode === "two-tool"
 					? selectBootstrapTools(cfg, taskMode, pi.getActiveTools())
