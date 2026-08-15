@@ -53,13 +53,28 @@ test/
 
 ## 安装
 
-尚未发布到 npm,直接按仓库安装。仓库的 `package.json` 已声明两个宿主的入口(`omp.extensions` / `pi.extensions`),所以只需给出仓库链接,宿主即可自动安装并加载正确入口。
+已发布到 npm(`omp-pi-anchored-standard@0.3.0`)。仓库的 `package.json` 也声明了两个宿主的入口(`omp.extensions` / `pi.extensions`),npm 与 git 安装都会自动加载正确入口。
 
 ### omp
+
+npm(推荐):
+
+```sh
+omp plugin install omp-pi-anchored-standard
+```
+
+或从仓库安装:
 
 ```sh
 omp plugin install github:Aurzex/omp-pi-anchored-standard
 ```
+
+> `omp plugin install` 依赖本机 `bun` 命令;没有 bun 时,手动拷进扩展目录即可:
+>
+> ```sh
+> mkdir -p ~/.omp/agent/extensions
+> cp -r /path/to/omp-pi-anchored-standard ~/.omp/agent/extensions/omp-pi-anchored-standard
+> ```
 
 然后配置(全局 `~/.omp/agent/config.yml`,或某项目的 `<项目>/.omp/config.yml`):
 
@@ -82,10 +97,16 @@ anchoredTools:
 
 ### pi
 
-在 `~/.pi/agent/settings.json` 的 `packages` 里加仓库链接,`/reload` 后自动安装:
+npm(推荐):
+
+```sh
+pi install omp-pi-anchored-standard
+```
+
+或把仓库加进 `~/.pi/agent/settings.json` 的 `packages`,`/reload` 后自动安装:
 
 ```jsonc
-{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@main"] }
+{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.3.0"] }
 ```
 
 然后配置(全局 `~/.pi/agent/settings.json` + 可信项目的 `.pi/settings.json` 覆盖,语义同上):
@@ -108,7 +129,7 @@ anchoredTools:
 
 改完 `/reload`。
 
-> 想锁到某个版本:先 push tag,再把 pi 的 `@main` 换成 `@v0.3.0`、omp 的 `github:Aurzex/omp-pi-anchored-standard` 换成 `github:Aurzex/omp-pi-anchored-standard#v0.3.0`。当前仓库无 tag,故用默认分支 `main`。
+> 版本锁:git 安装可用 `@v0.3.0`(pi)/ `#v0.3.0`(omp);npm 安装默认就是 `latest`(`0.3.0`)。
 
 ## 验证
 
