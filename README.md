@@ -49,10 +49,10 @@ src/
   core.ts   # 共享纯逻辑:toolName / deepMerge / matchGlob / modelMatches /
             # hasToolCallHistory / hasAssistantMessage / isSubagentSession /
             # isPromoted / filterTools / zeroAnchorPayload / extractRaw / applyDefaults
-  omp.ts    # omp 入口:before_provider_request + getBranch() + config.yml(YAML)
+  omp.ts    # omp 入口:setActiveTools 收窄/恢复活动工具集 + context 注入 anchor + config.yml(YAML)
   pi.ts     # pi 入口:before_provider_request + buildContextEntries() + settings.json
 test/
-  core.test.ts   # node:test 单测(57 例)
+  core.test.ts   # node:test 单测(62 例)
 ```
 
 ## 安装
