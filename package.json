@@ -1,0 +1,31 @@
+{
+	"name": "omp-pi-anchored-standard",
+	"version": "0.2.0",
+	"description": "Anchored tool catalog for omp and pi: first request exposes a minimal bootstrap catalog (shell + read), full catalog after the first durable tool call. Port of xiaobright/dsh-anchored-standard via dbydd/pi-anchored-tool-for-dspro.",
+	"type": "module",
+	"license": "MIT",
+	"files": [
+		"src"
+	],
+	"omp": {
+		"extensions": [
+			"./src/omp.ts"
+		]
+	},
+	"pi": {
+		"extensions": [
+			"./src/pi.ts"
+		]
+	},
+	"scripts": {
+		"test": "node --test \"test/**/*.test.ts\"",
+		"typecheck": "tsc --noEmit"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "0.84.2",
+		"@oh-my-pi/pi-coding-agent": "17.3.4",
+		"@types/bun": "^1.2.0",
+		"@types/node": "^24.0.0",
+		"typescript": "^5.8.0"
+	}
+}
