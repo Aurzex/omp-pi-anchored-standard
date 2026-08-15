@@ -57,7 +57,7 @@ test/
 
 ## 安装
 
-已发布到 npm(`omp-pi-anchored-standard@0.7.0`)。仓库的 `package.json` 也声明了两个宿主的入口(`omp.extensions` / `pi.extensions`),npm 与 git 安装都会自动加载正确入口。
+已发布到 npm(`omp-pi-anchored-standard@0.8.0`)。仓库的 `package.json` 也声明了两个宿主的入口(`omp.extensions` / `pi.extensions`),npm 与 git 安装都会自动加载正确入口。
 
 ### omp
 
@@ -113,7 +113,7 @@ pi install omp-pi-anchored-standard
 或把仓库加进 `~/.pi/agent/settings.json` 的 `packages`,`/reload` 后自动安装:
 
 ```jsonc
-{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.7.0"] }
+{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.8.0"] }
 ```
 
 默认配置即可用(自动锚定 `deepseek-v4-pro`,纯 anchored-standard;`taskRouting` 默认关闭)。如需覆盖,在全局 `~/.pi/agent/settings.json` + 可信项目的 `.pi/settings.json` 配置(语义同上):
@@ -138,7 +138,7 @@ pi install omp-pi-anchored-standard
 
 改完 `/reload`。
 
-> 版本锁:git 安装可用 `@v0.7.0`(pi)/ `#v0.7.0`(omp);npm 安装默认就是 `latest`(`0.7.0`)。
+> 版本锁:git 安装可用 `@v0.8.0`(pi)/ `#v0.8.0`(omp);npm 安装默认就是 `latest`(`0.8.0`)。
 
 ## 验证
 
