@@ -462,7 +462,7 @@ describe("shared config helpers", () => {
 	});
 
 	test("promoteTrigger maps zero mode to the assistant-message trigger", () => {
-		assert.equal(promoteTrigger(cfg), "either");
+		assert.equal(promoteTrigger(cfg), "tool-call");
 		assert.equal(
 			promoteTrigger({ ...cfg, bootstrapMode: "zero" }),
 			"assistant-message",
@@ -471,9 +471,9 @@ describe("shared config helpers", () => {
 			promoteTrigger({
 				...cfg,
 				bootstrapMode: "two-tool",
-				promoteOn: "tool-call",
+				promoteOn: "either",
 			}),
-			"tool-call",
+			"either",
 		);
 	});
 
@@ -654,10 +654,10 @@ describe("applyDefaults", () => {
 	const fullDefaults = {
 		enabled: true,
 		models: ["deepseek-v4-pro"],
-		bootstrapTools: ["bash", "edit"],
+		bootstrapTools: ["bash", "read"],
 		notify: true,
 		bootstrapMode: "two-tool",
-		promoteOn: "either",
+		promoteOn: "tool-call",
 		anchorText: ANCHOR_TEXT,
 		minimalSystemPrompt: true,
 		bootstrapMaxTokens: undefined,
@@ -678,7 +678,7 @@ describe("applyDefaults", () => {
 	test("empty bootstrapTools falls back to the default list", () => {
 		assert.deepStrictEqual(
 			applyDefaults({ bootstrapTools: [] }).bootstrapTools,
-			["bash", "edit"],
+			["bash", "read"],
 		);
 	});
 	test("scalars default when missing", () => {
@@ -719,7 +719,7 @@ describe("applyDefaults", () => {
 			promoteOn: "tool_call",
 		});
 		assert.equal(cfg.bootstrapMode, "two-tool");
-		assert.equal(cfg.promoteOn, "either");
+		assert.equal(cfg.promoteOn, "tool-call");
 	});
 	test("invalid bootstrapMaxTokens leaves the cap off", () => {
 		assert.equal(

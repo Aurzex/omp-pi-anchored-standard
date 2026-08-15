@@ -33,9 +33,9 @@
  *     "anchoredTools": {
  *       "enabled": true,
  *       "models": ["deepseek-v4-pro"],       // glob patterns; "provider/modelId" or bare modelId
- *       "bootstrapTools": ["bash", "read"],  // two-tool mode only
+ *       "bootstrapTools": ["bash", "read"],  // two-tool mode only (default)
  *       "bootstrapMode": "two-tool",         // "two-tool" | "zero"
- *       "promoteOn": "either",               // "tool-call" | "assistant-message" | "either"
+ *       "promoteOn": "tool-call",            // "tool-call" | "assistant-message" | "either"
  *       "minimalSystemPrompt": true,         // system prompt → DSH minimal persona (permanent)
  *       "bootstrapMaxTokens": 1024,          // optional cap; unset = no cap
  *       "anchorText": "This round is a test. Tools are not open yet; all tools will open next round.",

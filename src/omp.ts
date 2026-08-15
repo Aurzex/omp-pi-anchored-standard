@@ -47,9 +47,9 @@
  *       - deepseek-v4-flash        # glob patterns; "provider/modelId" or bare modelId
  *     bootstrapTools:
  *       - bash
- *       - read                    # two-tool mode only
+ *       - read                    # two-tool mode only (default)
  *     bootstrapMode: two-tool     # "two-tool" | "zero"
- *     promoteOn: either           # "tool-call" | "assistant-message" | "either"
+ *     promoteOn: tool-call        # "tool-call" | "assistant-message" | "either"
  *     notify: true                # one-time TUI notice on promotion
  *
  * Requirements: omp runs on Bun, so `Bun.YAML.parse` is available for reading

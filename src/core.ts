@@ -282,7 +282,9 @@ export function promotionPhase(
  * configured trigger. Matches upstream's `PROMOTE_EVENTS`:
  *  - tool-call:         first durable tool call
  *  - assistant-message: first durable assistant message
- *  - either (default):  whichever comes first
+ *  - tool-call (default): first durable tool call
+ *  - assistant-message:    first durable assistant message
+ *  - either:               whichever comes first
  */
 export function isPromoted(
 	entries: EntryLike[],
@@ -1021,7 +1023,7 @@ export function validateRawConfig(
 	}
 	if (raw.promoteOn !== undefined && !isPromoteOn(raw.promoteOn)) {
 		warn(
-			`[${extName}] invalid promoteOn ${JSON.stringify(raw.promoteOn)}; using "either"`,
+			`[${extName}] invalid promoteOn ${JSON.stringify(raw.promoteOn)}; using "tool-call"`,
 		);
 	}
 	if (
@@ -1079,10 +1081,16 @@ export const ANCHOR_TEXT =
 export const DEFAULTS: Config = {
 	enabled: true,
 	models: ["deepseek-v4-pro"],
-	bootstrapTools: ["bash", "edit"],
+	// The 98/99 anchored-standard runs on xiaobright/modeltest bootstrapped the
+	// first request with the platform shell + read, not an editor; keep that
+	// measured high-score surface as the zero-config default.
+	bootstrapTools: ["bash", "read"],
 	notify: true,
 	bootstrapMode: "two-tool",
-	promoteOn: "either",
+	// The frozen anchored-standard preset promotes on the first durable
+	// tool/call. `either` remains available for sessions where a text-only
+	// first reply must also unlock the full catalog.
+	promoteOn: "tool-call",
 	anchorText: ANCHOR_TEXT,
 	minimalSystemPrompt: true,
 	bootstrapMaxTokens: undefined,

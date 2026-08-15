@@ -22,7 +22,7 @@ DeepSeek V4 Pro 对 API 可见的工具目录高度敏感。Project2 评测(Deep
 
 ## 行为语义
 
-- **`promoteOn`(默认 `either`)**:`tool-call` = 第一个持久 tool call;`assistant-message` = 第一个持久 assistant 消息;`either` = 两者先到者。默认 `either` 避免"纯文本首答把会话永远困在 bootstrap"(上游的默认选择;pi 移植的 `tool-call` 行为可通过配置恢复)。
+- **`promoteOn`(默认 `tool-call`)**:`tool-call` = 第一个持久 tool call;`assistant-message` = 第一个持久 assistant 消息;`either` = 两者先到者。默认对齐 modeltest 中 98/99 分 anchored-standard 冻结快照的"第一个持久 `tool/call` 后恢复完整目录";若希望纯文本首答也立即提升,可显式配置 `either`。
 - 失败的 tool call 也算持久信号 → 提升。
 - 目录每个锚定阶段**只变一次**(一次 request-prefix cache 断层);compaction 后作为「第二个首请求」重新收窄。
 - 阶段从**持久会话条目**推导(`getBranch()` / `buildContextEntries()`),`/resume`、`/reload` 自动保留。
@@ -31,7 +31,7 @@ DeepSeek V4 Pro 对 API 可见的工具目录高度敏感。Project2 评测(Deep
 - 两阶段提升决策按会话 id 在进程内记忆,扫描只做一次;`session_compact` 后重置该会话的 memo(compaction epoch,对齐上游 `compaction-epoch.mjs`)。
 - **宿主机制不同**(行为一致):omp 侧通过 `pi.setActiveTools()` 原生收窄/恢复活动工具集(`before_provider_request` 的 payload 替换在 openai-completions 传输层被丢弃,不可靠),zero 模式 anchor 消息经 `context` 事件注入(序列化前生效,所有传输层都遵守);pi 侧沿用 pi 移植的 `before_provider_request` payload 过滤(pi 端口已验证有效)。
 - **`minimalSystemPrompt`(默认 `true`)**:目标模型的系统提示被整体改写为 DSH minimal 人设(`You are a helpful software engineer assistant.`,与上游 Harness `minimal` preset 逐字节一致)。这是与工具目录**同级**的轨迹锚点:改写措辞会破坏 `We need` 推理风格,故永久生效(整段会话),只有工具目录提升。设 `false` 保留宿主默认系统提示。omp 经 `before_agent_start` 返回 `systemPrompt` 替换;pi 经 payload 的顶层 `system` / `messages[0]`(role `system`/`developer`)改写。
-- **默认 bootstrap 工具对 `["bash", "edit"]`**:上游 dsh-anchored-standard 实测的 Minimal 工具 schema 是持久 `bash` + `str_replace_editor`(issue #11:该 schema 在适配器默认 maxTokens 下 5/5 锚定 `We need`,`bash`/`read` 等 standard 族 schema 11/11 失败)。omp/pi 工具目录没有 `str_replace_editor`,故默认使用宿主等价对 `bash` + `edit`(单文件精确替换编辑器,即 shell + 编辑器);若目录里存在 `str_replace_editor`(例如 DSH 方言),可显式配置 `["bash", "str_replace_editor"]`。`bash`/`pwsh` 条目会按目录里实际存在的平台 shell 归一化(`pwsh` 优先,对齐上游 router-bootstrap)。
+- **默认 bootstrap 工具对 `["bash", "read"]`**:modeltest 的 98/99 分 anchored-standard 冻结快照(`tools/deepseek-harness-presets/anchored-standard`)首请求只暴露**当前平台 shell + `read`**(Windows 为 `pwsh/read`,Linux/macOS 为 `bash/read`),第一个持久 `tool/call` 后恢复完整目录。omp/pi 默认按宿主平台归一化 shell,并保留 `read` 作为首轮读文件工具;若目录里存在 `str_replace_editor`(例如 DSH 方言)且想复刻上游 Minimal 的精确 schema,可显式配置 `["bash", "str_replace_editor"]`。`bash`/`pwsh` 条目会按目录里实际存在的平台 shell 归一化(`pwsh` 优先,对齐上游 router-bootstrap)。
 - **`bootstrapMaxTokens`(默认不封顶,仅 pi)**:可选的首请求输出预算封顶。上游 issue #11 实测:Minimal 工具 schema 在适配器默认 maxTokens(256000)下**无需封顶**即可锚定 `We need` 轨迹(5/5),而封顶的送达依赖 profile package 的 `prepareCall` 行为(rc.5 源码可达请求,rc.6 预构建包会被 `adapterDefaults.maxTokens` 覆盖)。故默认不封顶(opt-in);配置后才封顶,提升后剥离注入的上限。omp 无原生 max-token 控制且 `before_provider_request` 返回值被 openai-completions 传输层丢弃,故此配置在 omp 侧仅做校验、不生效。
 - **`taskRouting`(默认 `false`,仅 `two-tool` 模式)**:参考 [dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite) / dsh-router-standard 的实测路由。首轮前从会话第一条用户消息分类任务:`react`(新建/开发)→ doer persona + 写优先工具(`read`/`write`/`edit`);`spec`(修复/维护)→ DSH minimal persona + 读优先工具(`read`/`edit`/`glob`/`grep`);`weak`(模糊/无关键词)→ 模型自分类 persona(w6c/w7)+ 写优先工具。**Flash 模型一律强制 `weak`**(w7 + 静态深度思考/决策闭环锚,参考 [v4-flash-godmode-opencode-go](https://github.com/SheberDavid/v4-flash-godmode-opencode-go):omp/pi 无 DSH 式 per-message inbox,近场引导必须静态并入 persona)。路由工具缺失时回退到 `bootstrapTools`,再缺失才 fail-safe。默认 `false` 走纯 anchored-standard(固定 DSH minimal persona + `bootstrapTools`),实测稳定复现 `We need` 风格;设 `true` 启用任务感知路由。
 - **`suppressedContextSources`(默认 `["skill-catalog", "agent-instructions"]`)**:首请求剥离自动注入的 AGENTS.md / skill-catalog / workspace 摘要——上游 issue #11 的 omp/pi 移植。消息携带 `source.kind` 时按来源精确过滤;omp/pi 消息无 `source.kind`,故按「只保留 system + last user」重建。显式配置 `[]` 关闭剥离而保留工具锚定。含 assistant/toolResult 的多轮历史不重建。
@@ -57,7 +57,7 @@ test/
 
 ## 安装
 
-已发布到 npm(`omp-pi-anchored-standard@0.8.1`)。仓库的 `package.json` 也声明了两个宿主的入口(`omp.extensions` / `pi.extensions`),npm 与 git 安装都会自动加载正确入口。
+已发布到 npm(`omp-pi-anchored-standard@0.9.0`)。仓库的 `package.json` 也声明了两个宿主的入口(`omp.extensions` / `pi.extensions`),npm 与 git 安装都会自动加载正确入口。
 
 ### omp
 
@@ -90,8 +90,8 @@ anchoredTools:
     bootstrapMode: two-tool # "two-tool" | "zero"
     bootstrapTools:
         - bash
-        - edit # 默认 shell+编辑器对(等价 DSH Minimal 的 bash+str_replace_editor)
-    promoteOn: either # "tool-call" | "assistant-message" | "either"
+        - read # 默认 shell+read(98/99 anchored-standard 首轮目录)
+    promoteOn: tool-call # "tool-call" | "assistant-message" | "either"
     minimalSystemPrompt: true # 系统提示 → DSH/route persona(永久)
     suppressedContextSources:
         - skill-catalog
@@ -113,7 +113,7 @@ pi install omp-pi-anchored-standard
 或把仓库加进 `~/.pi/agent/settings.json` 的 `packages`,`/reload` 后自动安装:
 
 ```jsonc
-{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.8.1"] }
+{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.9.0"] }
 ```
 
 默认配置即可用(自动锚定 `deepseek-v4-pro`,纯 anchored-standard;`taskRouting` 默认关闭)。如需覆盖,在全局 `~/.pi/agent/settings.json` + 可信项目的 `.pi/settings.json` 配置(语义同上):
@@ -124,8 +124,8 @@ pi install omp-pi-anchored-standard
 		"enabled": true,
 		"models": ["deepseek-v4-pro"],
 		"bootstrapMode": "two-tool",
-		"bootstrapTools": ["bash", "edit"],
-		"promoteOn": "either",
+		"bootstrapTools": ["bash", "read"],
+		"promoteOn": "tool-call",
 		"minimalSystemPrompt": true,
 		"taskRouting": false,
 		"anchorText": "This round is a test. Tools are not open yet; all tools will open next round.",
@@ -138,7 +138,7 @@ pi install omp-pi-anchored-standard
 
 改完 `/reload`。
 
-> 版本锁:git 安装可用 `@v0.8.1`(pi)/ `#v0.8.1`(omp);npm 安装默认就是 `latest`(`0.8.1`)。
+> 版本锁:git 安装可用 `@v0.9.0`(pi)/ `#v0.9.0`(omp);npm 安装默认就是 `latest`(`0.9.0`)。
 
 ## 验证
 
@@ -147,6 +147,7 @@ pi install omp-pi-anchored-standard
 首次锚定与系统提示改写会打日志(omp 走 `pi.logger`,pi 走 console):
 
 ```
+[anchored-tools] anchoring first request for deepseek/deepseek-v4-pro: 2/25 tools (bash, read)                                       # two-tool (default)
 [anchored-tools] anchoring first request for deepseek/deepseek-v4-pro: 5/25 tools (read, edit, glob, grep, bash) [task-routing spec]   # two-tool
 [anchored-tools] anchoring first request for deepseek/deepseek-v4-pro: 4/25 tools (read, write, edit, bash) [task-routing react]      # two-tool
 [anchored-tools] anchoring first request for deepseek/deepseek-v4-flash: 0 tools (zero-tool anchor)                                  # zero
@@ -182,7 +183,7 @@ npm test            # node --test(原生 TS,无需 bun;bun 环境同样可跑 no
 
 采纳要点:
 
-- `bootstrapTools` 默认 `["bash", "edit"]`:dsh-anchored-standard 实测 Minimal schema 是 `bash` + `str_replace_editor`;omp/pi 无 `str_replace_editor`,用宿主单文件精确替换编辑器 `edit` 等价替代。
+- `bootstrapTools` 默认 `["bash", "read"]`:modeltest 的 98/99 分 anchored-standard 冻结快照首轮就是 `shell + read`;omp/pi 用宿主等价的 `bash`/`pwsh` + `read`,并在目录中存在 `str_replace_editor` 时允许显式切换回 Minimal 精确 schema。
 - `taskRouting` 下 Flash 一律 `weak` 并静态并入 w7 深度思考/决策闭环锚(v4-flash-godmode 对 opencode-go 的适配;omp/pi 同样无 DSH 式 per-message inbox,动态近场引导不可用)。
 - 平台 shell 选择 `pwsh` 优先(dsh-router-standard router-bootstrap)。
 - `compactionTools` / compaction epoch 移植自 dsh-anchored-standard `compaction-epoch.mjs`(compaction 后作为「第二个首请求」重新锚定)。
