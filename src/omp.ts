@@ -65,9 +65,11 @@ import {
 	type ExtensionContext,
 } from "@oh-my-pi/pi-coding-agent";
 import {
+	addTrajectory,
 	anchorPayloadMessages,
 	applyDefaults,
 	classifyTask,
+	countTrajectory,
 	deepMerge,
 	extractRaw,
 	isBootstrapMode,
@@ -82,12 +84,15 @@ import {
 	selectBootstrapTools,
 	SessionPromotionMemo,
 	shouldRestoreFullCatalog,
+	stripContextMessages,
 	taskTextFromEntries,
+	trajectoryTextFromMessage,
 	type Config,
 	type EntryLike,
 	type PayloadMessage,
 	type RawConfig,
 	type TaskMode,
+	type TrajectoryCounts,
 } from "./core";
 
 const EXT_NAME = "anchored-tools";
@@ -166,6 +171,8 @@ export default function (pi: ExtensionAPI) {
 	const promotionMemo = new SessionPromotionMemo();
 	// Sessions that already showed the one-time promotion notice.
 	const notified = new Set<string>();
+	// Per-session trajectory fingerprint (let me / we / let's) for /anchored-tools.
+	const trajectory = new Map<string, TrajectoryCounts>();
 	const logger = pi.logger;
 
 	const isTarget = (
@@ -348,35 +355,50 @@ export default function (pi: ExtensionAPI) {
 		await ensureRestored(ctx, loadConfig(ctx, logger));
 	});
 	pi.on("message_end", async (event, ctx) => {
-		await ensureRestored(ctx, loadConfig(ctx, logger));
+		const cfg = loadConfig(ctx, logger);
+		await ensureRestored(ctx, cfg);
+		if (!isTarget(ctx.model, cfg)) return;
+		const msg = event.message as
+			{ role?: string; content?: unknown } | undefined;
+		if (!msg || msg.role !== "assistant") return;
+		const sid = ctx.sessionManager.getSessionId();
+		if (!sid) return;
+		trajectory.set(
+			sid,
+			addTrajectory(
+				trajectory.get(sid) ?? { letMe: 0, we: 0, lets: 0 },
+				countTrajectory(trajectoryTextFromMessage(msg)),
+			),
+		);
 	});
 
-	// Zero-mode anchor: hide the real user message behind the fixed anchor
-	// turn on the first request. The context event is applied before
-	// serialization and is honored by every transport.
+	// Context shaping: zero-mode anchors the first request on a fixed turn;
+	// two-tool mode strips auto-injected context (AGENTS.md, skill catalog)
+	// from the first request. The context event fires before serialization and
+	// is honored by every transport.
 	pi.on("context", (event, ctx) => {
 		const cfg = loadConfig(ctx, logger);
-		if (
-			cfg.bootstrapMode !== "zero" ||
-			!cfg.enabled ||
-			cfg.models.length === 0
-		)
-			return;
+		if (!cfg.enabled || cfg.models.length === 0) return;
 		const sid = ctx.sessionManager.getSessionId();
 		if (!sid || !narrowed.has(sid) || restored.has(sid)) return;
 		if (!isTarget(ctx.model, cfg)) return;
 		const promoted = memoizedIsPromoted(
 			promotionMemo,
 			sid,
-			"assistant-message",
+			trigger(cfg),
 			() => ctx.sessionManager.getBranch(),
 		);
 		if (promoted) return;
-		const replaced = anchorPayloadMessages(
-			event.messages as unknown as PayloadMessage[],
-			cfg.anchorText,
-		);
-		if (replaced) return { messages: replaced as AgentMessage[] };
+		const messages = event.messages as unknown as PayloadMessage[];
+		if (cfg.bootstrapMode === "zero") {
+			const replaced = anchorPayloadMessages(messages, cfg.anchorText);
+			if (replaced) return { messages: replaced as AgentMessage[] };
+			return;
+		}
+		if (cfg.minimalSystemPrompt) {
+			const stripped = stripContextMessages(messages);
+			if (stripped) return { messages: stripped as AgentMessage[] };
+		}
 	});
 
 	pi.on("session_shutdown", () => {
@@ -385,6 +407,7 @@ export default function (pi: ExtensionAPI) {
 		fullTools.clear();
 		notified.clear();
 		promotionMemo.clear();
+		trajectory.clear();
 	});
 
 	pi.registerCommand("anchored-tools", {
@@ -410,6 +433,8 @@ export default function (pi: ExtensionAPI) {
 						: cfg.bootstrapMode === "zero"
 							? "bootstrap (zero-tool anchor)"
 							: `bootstrap (${selected?.tools.join(", ") ?? cfg.bootstrapTools.join(", ")} only)`;
+			const sid = ctx.sessionManager.getSessionId();
+			const traj = sid ? trajectory.get(sid) : undefined;
 			const lines = [
 				`enabled: ${cfg.enabled}`,
 				`mode: ${cfg.bootstrapMode}`,
@@ -418,6 +443,7 @@ export default function (pi: ExtensionAPI) {
 				`task routing: ${cfg.taskRouting ? `on (task=${taskMode})` : "off"}`,
 				`bootstrap tools: ${selected ? `${selected.tools.join(", ")} (${selected.used})` : cfg.bootstrapTools.join(", ")}`,
 				`bootstrap max tokens: ${cfg.bootstrapMaxTokens ?? "off (default)"}${cfg.bootstrapMode === "two-tool" ? " (pi only)" : ""}`,
+				`trajectory: ${traj ? `we ${traj.we}, let's ${traj.lets}, let me ${traj.letMe}` : "n/a"}`,
 				`minimal system prompt: ${cfg.minimalSystemPrompt ? "on (DSH/route persona)" : "off (host default)"}`,
 				`current model: ${model ? `${model.provider}/${model.id}` : "n/a"}`,
 				`model matched: ${matched ? "yes" : "no"}`,

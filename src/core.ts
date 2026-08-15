@@ -391,6 +391,94 @@ export function zeroAnchorPayload(
 	return { payload: next, anchored: true };
 }
 
+/**
+ * Strip auto-injected context from the FIRST request by keeping only the
+ * system/developer prompt and the last user message. This is the omp/pi
+ * equivalent of upstream `suppressedContextSources` (issue #11): instead of
+ * identifying injected messages by `source.kind` (which omp/pi messages lack),
+ * it drops EVERYTHING except the system prompt and the user's actual message,
+ * so workspace instructions, AGENTS.md/CLAUDE.md digests, and the skill
+ * catalog never reach the first request.
+ *
+ * Returns undefined when there is nothing to strip: no user message, or the
+ * conversation already contains an assistant/toolResult reply (not the first
+ * request — rebuilding a multi-turn history would drop the model's own turns).
+ */
+export function stripContextMessages(
+	messages: PayloadMessage[] | undefined,
+): PayloadMessage[] | undefined {
+	if (!Array.isArray(messages) || messages.length === 0) return undefined;
+	const hasReply = messages.some((m) => {
+		const r = m?.role;
+		return r === "assistant" || r === "toolResult" || r === "tool";
+	});
+	if (hasReply) return undefined;
+	const userIdx = lastUserIndex(messages);
+	if (userIdx < 0) return undefined;
+	const systemIdx = messages.findIndex(
+		(m) => m?.role === "system" || m?.role === "developer",
+	);
+	const kept: PayloadMessage[] = [];
+	if (systemIdx >= 0) {
+		const s = messages[systemIdx];
+		if (s) kept.push(s);
+	}
+	const u = messages[userIdx];
+	if (u) kept.push(u);
+	if (kept.length === messages.length) return undefined; // nothing dropped
+	return kept;
+}
+
+/** Word-frequency fingerprint from xiaobright/modeltest trajectory analysis. */
+export interface TrajectoryCounts {
+	letMe: number;
+	we: number;
+	lets: number;
+}
+
+const LET_ME_RE = /\blet me\b/gi;
+const WE_RE = /\bwe\b/gi;
+const LETS_RE = /\blet's\b/gi;
+
+/** Count the `let me` / `we` / `let's` fingerprint across reasoning + text. */
+export function countTrajectory(text: string): TrajectoryCounts {
+	return {
+		letMe: (text.match(LET_ME_RE) ?? []).length,
+		we: (text.match(WE_RE) ?? []).length,
+		lets: (text.match(LETS_RE) ?? []).length,
+	};
+}
+
+export function addTrajectory(
+	a: TrajectoryCounts,
+	b: TrajectoryCounts,
+): TrajectoryCounts {
+	return {
+		letMe: a.letMe + b.letMe,
+		we: a.we + b.we,
+		lets: a.lets + b.lets,
+	};
+}
+
+/**
+ * Concatenate an assistant message's reasoning + visible text for trajectory
+ * counting. Duck-typed so it works on both hosts' assistant message shapes.
+ */
+export function trajectoryTextFromMessage(message: {
+	content?: unknown;
+}): string {
+	const content = message?.content;
+	if (!Array.isArray(content)) return "";
+	let out = "";
+	for (const block of content) {
+		if (!block || typeof block !== "object") continue;
+		const b = block as Record<string, unknown>;
+		if (typeof b.thinking === "string") out += b.thinking + " ";
+		if (typeof b.text === "string") out += b.text + " ";
+	}
+	return out;
+}
+
 /** DSH minimal-mode system prompt, byte-identical to the DeepSeek Harness
  * `minimal` preset persona (`complete: true` — the persona IS the entire
  * system prompt). This codex-style one-liner is the co-equal trajectory

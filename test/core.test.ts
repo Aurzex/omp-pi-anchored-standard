@@ -2,11 +2,13 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import {
 	ANCHOR_TEXT,
+	addTrajectory,
 	anchorContent,
 	anchorPayloadMessages,
 	applyDefaults,
 	capMaxTokens,
 	classifyTask,
+	countTrajectory,
 	deepMerge,
 	extractRaw,
 	filterTools,
@@ -28,9 +30,11 @@ import {
 	selectBootstrapTools,
 	SessionPromotionMemo,
 	shouldRestoreFullCatalog,
+	stripContextMessages,
 	taskTextFromEntries,
 	taskTextFromMessages,
 	toolName,
+	trajectoryTextFromMessage,
 	zeroAnchorPayload,
 } from "../src/core.ts";
 
@@ -1024,5 +1028,88 @@ describe("isPositiveInt", () => {
 		assert.equal(isPositiveInt(1.5), false);
 		assert.equal(isPositiveInt("1024"), false);
 		assert.equal(isPositiveInt(undefined), false);
+	});
+});
+
+describe("stripContextMessages", () => {
+	test("drops injected context, keeps system + last user", () => {
+		const messages = [
+			{ role: "system", content: "host prompt" },
+			{ role: "user", content: "AGENTS.md digest" },
+			{ role: "user", content: "real task" },
+		];
+		const stripped = stripContextMessages(messages);
+		assert.ok(stripped);
+		assert.equal(stripped.length, 2);
+		assert.equal(stripped[0]!.role, "system");
+		assert.equal(stripped[1]!.content, "real task");
+	});
+	test("no-op when no user message", () => {
+		assert.equal(
+			stripContextMessages([{ role: "system", content: "x" }]),
+			undefined,
+		);
+	});
+	test("no-op once a reply exists (not the first request)", () => {
+		const messages = [
+			{ role: "system", content: "x" },
+			{ role: "user", content: "hi" },
+			{ role: "assistant", content: "yo" },
+			{ role: "user", content: "again" },
+		];
+		assert.equal(stripContextMessages(messages), undefined);
+	});
+	test("no-op when already minimal [system, user]", () => {
+		const messages = [
+			{ role: "system", content: MINIMAL_SYSTEM_PROMPT },
+			{ role: "user", content: "hi" },
+		];
+		assert.equal(stripContextMessages(messages), undefined);
+	});
+	test("keeps developer role as the system prompt", () => {
+		const messages = [
+			{ role: "developer", content: "x" },
+			{ role: "user", content: "hi" },
+			{ role: "user", content: "extra context" },
+		];
+		const stripped = stripContextMessages(messages);
+		assert.ok(stripped);
+		assert.equal(stripped[0]!.role, "developer");
+		assert.equal(stripped[1]!.content, "extra context");
+	});
+});
+
+describe("trajectory", () => {
+	test("countTrajectory counts the fingerprint words", () => {
+		assert.deepStrictEqual(countTrajectory("we need let me check"), {
+			letMe: 1,
+			we: 1,
+			lets: 0,
+		});
+		assert.deepStrictEqual(countTrajectory("let's do it, let's go"), {
+			letMe: 0,
+			we: 0,
+			lets: 2,
+		});
+	});
+	test("trajectoryTextFromMessage joins thinking and text", () => {
+		assert.equal(
+			trajectoryTextFromMessage({
+				content: [
+					{ type: "thinking", thinking: "we need" },
+					{ type: "text", text: "let me" },
+				],
+			}),
+			"we need let me ",
+		);
+	});
+	test("addTrajectory sums counts", () => {
+		assert.deepStrictEqual(
+			addTrajectory(
+				{ letMe: 1, we: 2, lets: 3 },
+				{ letMe: 4, we: 5, lets: 6 },
+			),
+			{ letMe: 5, we: 7, lets: 9 },
+		);
 	});
 });

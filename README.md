@@ -33,6 +33,7 @@ DeepSeek V4 Pro 对 API 可见的工具目录高度敏感。Project2 评测(Deep
 - **`minimalSystemPrompt`(默认 `true`)**:目标模型的系统提示被整体改写为 DSH minimal 人设(`You are a helpful software engineer assistant.`,与上游 Harness `minimal` preset 逐字节一致)。这是与工具目录**同级**的轨迹锚点:改写措辞会破坏 `We need` 推理风格,故永久生效(整段会话),只有工具目录提升。设 `false` 保留宿主默认系统提示。omp 经 `before_agent_start` 返回 `systemPrompt` 替换;pi 经 payload 的顶层 `system` / `messages[0]`(role `system`/`developer`)改写。
 - **`bootstrapMaxTokens`(默认不封顶,仅 pi)**:可选的首请求输出预算封顶。上游 issue #11 实测:Minimal 工具 schema 在适配器默认 maxTokens(256000)下**无需封顶**即可锚定 `We need` 轨迹(5/5),而封顶的送达依赖 profile package 的 `prepareCall` 行为(rc.5 源码可达请求,rc.6 预构建包会被 `adapterDefaults.maxTokens` 覆盖)。故默认不封顶(opt-in);配置后才封顶,提升后剥离注入的上限。omp 无原生 max-token 控制且 `before_provider_request` 返回值被 openai-completions 传输层丢弃,故此配置在 omp 侧仅做校验、不生效。
 - **`taskRouting`(默认 `false`,仅 `two-tool` 模式)**:参考 [dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite) / dsh-router-standard 的实测路由(Pro 按任务选 persona;Flash 用 neutral + classify)。首轮前从会话第一条用户消息分类任务:`react`(新建/开发)→ doer persona + 写优先工具(`read`/`write`/`edit`);`spec`(修复/维护)→ DSH minimal persona + 读优先工具(`read`/`edit`/`glob`/`grep`);`weak`(模糊/无关键词)→ 模型自分类 persona(w6c/w7)+ 写优先工具。路由工具缺失时回退到 `bootstrapTools`,再缺失才 fail-safe。默认 `false` 走纯 anchored-standard(固定 DSH minimal persona + `bootstrapTools`),实测稳定复现 `We need` 风格;设 `true` 启用任务感知路由。
+- **首请求上下文剥离**(仅 `minimalSystemPrompt` 开启):首请求消息被重建为 `[system(DSH minimal), 最后一条 user]`,自动注入的 AGENTS.md / skill-catalog / workspace 摘要一律不进首请求——上游 `suppressedContextSources`(issue #11)的 omp/pi 等价实现(omp/pi 消息无 `source.kind`,故按「只保留 system + user」重建,而非按来源过滤)。含 assistant/toolResult 的多轮历史不重建。
 
 上游新增的实验对比模式:首请求**零工具** + 一条固定 anchor 用户消息(默认 `This round is a test. Tools are not open yet; all tools will open next round.`,可配置),让第一条推理链走零注入轨迹;anchor 回复落库后恢复完整目录。本插件的移植:
 
@@ -45,11 +46,11 @@ DeepSeek V4 Pro 对 API 可见的工具目录高度敏感。Project2 评测(Deep
 
 ```text
 src/
-  core.ts   # 共享纯逻辑:toolName / deepMerge / matchGlob / modelMatches / hasToolCallHistory / hasAssistantMessage / isSubagentSession / isPromoted / filterTools / zeroAnchorPayload / rewriteSystemPrompt / capMaxTokens / extractRaw / applyDefaults
+  core.ts   # 共享纯逻辑:toolName / deepMerge / matchGlob / modelMatches / hasToolCallHistory / hasAssistantMessage / isSubagentSession / isPromoted / filterTools / zeroAnchorPayload / stripContextMessages / rewriteSystemPrompt / capMaxTokens / countTrajectory / extractRaw / applyDefaults
   omp.ts    # omp 入口:setActiveTools 收窄/恢复 + context 注入 anchor + before_agent_start 替换 systemPrompt + config.yml(YAML)
   pi.ts     # pi 入口:before_provider_request + buildContextEntries() + settings.json
 test/
-  core.test.ts   # node:test 单测(102 例)
+  core.test.ts   # node:test 单测(111 例)
 ```
 
 ## 安装
@@ -136,7 +137,7 @@ pi install omp-pi-anchored-standard
 
 ## 验证
 
-会话里跑 `/anchored-tools`,报告当前模型、是否命中目标、模式、任务路由、提升触发器、当前阶段(`bootstrap` / `promoted (full catalog)` / `not-targeted` / `disabled`)。
+会话里跑 `/anchored-tools`,报告当前模型、是否命中目标、模式、任务路由、提升触发器、当前阶段(`bootstrap` / `promoted (full catalog)` / `not-targeted` / `disabled`),以及轨迹指纹(`we` / `let's` / `let me` 计数)。
 
 首次锚定与系统提示改写会打日志(omp 走 `pi.logger`,pi 走 console):
 
@@ -163,7 +164,7 @@ npm test            # node --test(原生 TS,无需 bun;bun 环境同样可跑 no
 - pi 侧无 `session_init` 条目,zero 模式的子代理豁免仅 omp 生效。
 - `bootstrapMaxTokens` 默认不封顶(opt-in),且仅 pi 生效:omp 无原生 max-token setter,其 `before_provider_request` 返回值被 openai-completions 传输层丢弃(见上),故 omp 只校验该配置、不施加输出预算封顶。
 - `models` 默认 `["deepseek-v4-pro"]`;显式配置 `[]` 可关闭锚定,不再要求用户必须配置目标模型。
-- 上游 `suppressedContextSources`(issue #11:首请求剥离自动注入的 AGENTS.md / skill-catalog 上下文)未移植:omp/pi 的消息模型没有 `source.kind` 字段,无法按来源标识自动注入的上下文;工具 schema + persona 已覆盖该锚点。
+- 上游 `suppressedContextSources`(issue #11:首请求剥离自动注入的 AGENTS.md / skill-catalog 上下文)已通过**消息重建**移植:omp/pi 消息无 `source.kind`,故首请求直接重建为 `[system, user]`,自动注入上下文一律丢弃;多轮历史跳过。
 
 ## License
 

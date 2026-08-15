@@ -51,9 +51,11 @@ import {
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import {
+	addTrajectory,
 	applyDefaults,
 	capMaxTokens,
 	classifyTask,
+	countTrajectory,
 	deepMerge,
 	extractRaw,
 	filterTools,
@@ -69,15 +71,18 @@ import {
 	routerPersonaFor,
 	selectBootstrapTools,
 	SessionPromotionMemo,
+	stripContextMessages,
 	taskTextFromEntries,
 	taskTextFromMessages,
 	toolName,
+	trajectoryTextFromMessage,
 	zeroAnchorPayload,
 	type Config,
 	type EntryLike,
 	type PayloadMessage,
 	type RawConfig,
 	type ToolLike,
+	type TrajectoryCounts,
 } from "./core";
 
 const EXT_NAME = "anchored-tools";
@@ -142,6 +147,8 @@ export default function (pi: ExtensionAPI) {
 	const spLogged = new Set<string>();
 	// Sessions already known promoted (append-only memo; avoids rescanning).
 	const promotionMemo = new SessionPromotionMemo();
+	// Per-session trajectory fingerprint (let me / we / let's) for /anchored-tools.
+	const trajectory = new Map<string, TrajectoryCounts>();
 
 	const isTarget = (
 		model: { id: string; provider: string } | undefined,
@@ -301,6 +308,18 @@ export default function (pi: ExtensionAPI) {
 						: ""),
 			);
 		}
+		// Strip auto-injected context (AGENTS.md, skill catalog) from the first
+		// request — the omp/pi equivalent of upstream `suppressedContextSources`
+		// (issue #11).
+		if (cfg.minimalSystemPrompt) {
+			const stripped = stripContextMessages(
+				payload.messages as PayloadMessage[] | undefined,
+			);
+			if (stripped) {
+				payload = { ...payload, messages: stripped };
+				changed = true;
+			}
+		}
 
 		return changed ? payload : undefined;
 	});
@@ -316,12 +335,29 @@ export default function (pi: ExtensionAPI) {
 			"info",
 		);
 	});
+	pi.on("message_end", (event, ctx) => {
+		const cfg = loadConfig(ctx, console.warn);
+		if (!isTarget(ctx.model, cfg)) return;
+		const msg = event.message as
+			{ role?: string; content?: unknown } | undefined;
+		if (!msg || msg.role !== "assistant") return;
+		const sid = ctx.sessionManager.getSessionId();
+		if (!sid) return;
+		trajectory.set(
+			sid,
+			addTrajectory(
+				trajectory.get(sid) ?? { letMe: 0, we: 0, lets: 0 },
+				countTrajectory(trajectoryTextFromMessage(msg)),
+			),
+		);
+	});
 
 	pi.on("session_shutdown", () => {
 		anchoredSessions.clear();
 		notified.clear();
 		spLogged.clear();
 		promotionMemo.clear();
+		trajectory.clear();
 	});
 
 	pi.registerCommand("anchored-tools", {
@@ -347,6 +383,8 @@ export default function (pi: ExtensionAPI) {
 						: cfg.bootstrapMode === "zero"
 							? "bootstrap (zero-tool anchor)"
 							: `bootstrap (${cfg.bootstrapTools.join(", ")} only)`;
+			const sid = ctx.sessionManager.getSessionId();
+			const traj = sid ? trajectory.get(sid) : undefined;
 			const lines = [
 				`enabled: ${cfg.enabled}`,
 				`mode: ${cfg.bootstrapMode}`,
@@ -355,6 +393,7 @@ export default function (pi: ExtensionAPI) {
 				`task routing: ${cfg.taskRouting ? `on (task=${taskMode})` : "off"}`,
 				`bootstrap tools: ${cfg.bootstrapTools.join(", ")}`,
 				`bootstrap max tokens: ${cfg.bootstrapMaxTokens ?? "off (default)"}`,
+				`trajectory: ${traj ? `we ${traj.we}, let's ${traj.lets}, let me ${traj.letMe}` : "n/a"}`,
 				`minimal system prompt: ${cfg.minimalSystemPrompt ? "on (DSH/route persona)" : "off (host default)"}`,
 				`current model: ${model ? `${model.provider}/${model.id}` : "n/a"}`,
 				`model matched: ${matched ? "yes" : "no"}`,
