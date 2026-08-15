@@ -59,14 +59,12 @@ import {
 	deepMerge,
 	extractRaw,
 	filterTools,
-	isBootstrapMode,
-	isPositiveInt,
-	isPromoteOn,
 	isPromoted,
 	isSubagentSession,
+	isTargetModel,
 	memoizedIsPromoted,
 	MINIMAL_SYSTEM_PROMPT,
-	modelMatches,
+	promoteTrigger,
 	rewriteSystemPrompt,
 	routerPersonaFor,
 	selectBootstrapTools,
@@ -76,6 +74,7 @@ import {
 	taskTextFromMessages,
 	toolName,
 	trajectoryTextFromMessage,
+	validateRawConfig,
 	zeroAnchorPayload,
 	type Config,
 	type EntryLike,
@@ -115,27 +114,7 @@ function loadConfig(
 		);
 		merged = deepMerge(globalRaw, projectRaw) as RawConfig;
 	}
-	if (
-		merged.bootstrapMode !== undefined &&
-		!isBootstrapMode(merged.bootstrapMode)
-	) {
-		warn(
-			`[${EXT_NAME}] invalid bootstrapMode ${JSON.stringify(merged.bootstrapMode)}; using "two-tool"`,
-		);
-	}
-	if (merged.promoteOn !== undefined && !isPromoteOn(merged.promoteOn)) {
-		warn(
-			`[${EXT_NAME}] invalid promoteOn ${JSON.stringify(merged.promoteOn)}; using "either"`,
-		);
-	}
-	if (
-		merged.bootstrapMaxTokens !== undefined &&
-		!isPositiveInt(merged.bootstrapMaxTokens)
-	) {
-		warn(
-			`[${EXT_NAME}] invalid bootstrapMaxTokens ${JSON.stringify(merged.bootstrapMaxTokens)}; using no cap (default)`,
-		);
-	}
+	validateRawConfig(merged, warn, EXT_NAME);
 	return applyDefaults(merged);
 }
 
@@ -149,14 +128,6 @@ export default function (pi: ExtensionAPI) {
 	const promotionMemo = new SessionPromotionMemo();
 	// Per-session trajectory fingerprint (let me / we / let's) for /anchored-tools.
 	const trajectory = new Map<string, TrajectoryCounts>();
-
-	const isTarget = (
-		model: { id: string; provider: string } | undefined,
-		cfg: Config,
-	): boolean =>
-		!!model &&
-		cfg.enabled &&
-		modelMatches(model.id, model.provider, cfg.models);
 
 	/** One-time promotion notice for a session we actually anchored. */
 	const maybeNotifyPromoted = (
@@ -189,16 +160,15 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_provider_request", (event, ctx) => {
 		const cfg = loadConfig(ctx, console.warn);
 		if (!cfg.enabled || cfg.models.length === 0) return;
-		if (!isTarget(ctx.model, cfg)) return;
+		if (!isTargetModel(cfg, ctx.model)) return;
 
 		const sid = ctx.sessionManager.getSessionId();
-		const promoteTrigger =
-			cfg.bootstrapMode === "zero" ? "assistant-message" : cfg.promoteOn;
+		const promoteOn = promoteTrigger(cfg);
 		let entries: EntryLike[] | undefined;
 		const promoted = memoizedIsPromoted(
 			promotionMemo,
 			sid,
-			promoteTrigger,
+			promoteOn,
 			() => {
 				const branch = ctx.sessionManager.buildContextEntries();
 				entries = branch;
@@ -326,7 +296,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_call", (event, ctx) => {
 		const cfg = loadConfig(ctx, console.warn);
-		if (!isTarget(ctx.model, cfg) || !cfg.notify) return;
+		if (!isTargetModel(cfg, ctx.model) || !cfg.notify) return;
 		const sid = ctx.sessionManager.getSessionId();
 		if (!sid || !anchoredSessions.get(sid) || notified.has(sid)) return;
 		notified.add(sid);
@@ -337,7 +307,7 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("message_end", (event, ctx) => {
 		const cfg = loadConfig(ctx, console.warn);
-		if (!isTarget(ctx.model, cfg)) return;
+		if (!isTargetModel(cfg, ctx.model)) return;
 		const msg = event.message as
 			{ role?: string; content?: unknown } | undefined;
 		if (!msg || msg.role !== "assistant") return;
@@ -366,13 +336,9 @@ export default function (pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			const cfg = loadConfig(ctx, console.warn);
 			const model = ctx.model;
-			const matched = isTarget(model, cfg);
+			const matched = isTargetModel(cfg, model);
 			const entries = ctx.sessionManager.buildContextEntries();
-			const trigger =
-				cfg.bootstrapMode === "zero"
-					? "assistant-message"
-					: cfg.promoteOn;
-			const promoted = isPromoted(entries, trigger);
+			const promoted = isPromoted(entries, promoteTrigger(cfg));
 			const taskMode = classifyTask(taskTextFromEntries(entries));
 			const phase = !cfg.enabled
 				? "disabled"

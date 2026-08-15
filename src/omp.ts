@@ -72,14 +72,12 @@ import {
 	countTrajectory,
 	deepMerge,
 	extractRaw,
-	isBootstrapMode,
-	isPositiveInt,
-	isPromoteOn,
 	isPromoted,
 	isSubagentSession,
+	isTargetModel,
 	memoizedIsPromoted,
 	MINIMAL_SYSTEM_PROMPT,
-	modelMatches,
+	promoteTrigger,
 	routerPersonaFor,
 	selectBootstrapTools,
 	SessionPromotionMemo,
@@ -87,6 +85,7 @@ import {
 	stripContextMessages,
 	taskTextFromEntries,
 	trajectoryTextFromMessage,
+	validateRawConfig,
 	type Config,
 	type EntryLike,
 	type PayloadMessage,
@@ -136,27 +135,7 @@ function loadConfig(
 		readConfigYaml(logger, configCandidates(join(ctx.cwd, OMP_CONFIG_DIR))),
 	);
 	const merged = deepMerge(globalRaw, projectRaw) as RawConfig;
-	if (
-		merged.bootstrapMode !== undefined &&
-		!isBootstrapMode(merged.bootstrapMode)
-	) {
-		logger.warn(
-			`[${EXT_NAME}] invalid bootstrapMode ${JSON.stringify(merged.bootstrapMode)}; using "two-tool"`,
-		);
-	}
-	if (merged.promoteOn !== undefined && !isPromoteOn(merged.promoteOn)) {
-		logger.warn(
-			`[${EXT_NAME}] invalid promoteOn ${JSON.stringify(merged.promoteOn)}; using "either"`,
-		);
-	}
-	if (
-		merged.bootstrapMaxTokens !== undefined &&
-		!isPositiveInt(merged.bootstrapMaxTokens)
-	) {
-		logger.warn(
-			`[${EXT_NAME}] invalid bootstrapMaxTokens ${JSON.stringify(merged.bootstrapMaxTokens)}; using no cap (default)`,
-		);
-	}
+	validateRawConfig(merged, (message) => logger.warn(message), EXT_NAME);
 	return applyDefaults(merged);
 }
 
@@ -174,22 +153,6 @@ export default function (pi: ExtensionAPI) {
 	// Per-session trajectory fingerprint (let me / we / let's) for /anchored-tools.
 	const trajectory = new Map<string, TrajectoryCounts>();
 	const logger = pi.logger;
-
-	const isTarget = (
-		model: { id: string; provider: string } | undefined,
-		cfg: Config,
-	): boolean =>
-		!!model &&
-		cfg.enabled &&
-		modelMatches(model.id, model.provider, cfg.models);
-
-	/** Classify the session's first durable user message (3+ call sites). */
-	const taskModeFor = (entries: EntryLike[]): TaskMode =>
-		classifyTask(taskTextFromEntries(entries));
-	const trigger = (
-		cfg: Config,
-	): "tool-call" | "assistant-message" | "either" =>
-		cfg.bootstrapMode === "zero" ? "assistant-message" : cfg.promoteOn;
 
 	/** One-time promotion notice for a session we actually anchored. */
 	const maybeNotifyPromoted = (
@@ -228,7 +191,7 @@ export default function (pi: ExtensionAPI) {
 			await ensureRestored(ctx, cfg);
 			return;
 		}
-		if (!isTarget(ctx.model, cfg)) {
+		if (!isTargetModel(cfg, ctx.model)) {
 			// Known non-target model after a switch: lift a previous narrowing.
 			// Unknown model at session_start is left alone; before_agent_start
 			// re-runs once the model is known.
@@ -241,7 +204,7 @@ export default function (pi: ExtensionAPI) {
 		const promoted = memoizedIsPromoted(
 			promotionMemo,
 			sid,
-			trigger(cfg),
+			promoteTrigger(cfg),
 			() => branch,
 		);
 		if (promoted) return; // already promoted (resume/reload)
@@ -307,7 +270,7 @@ export default function (pi: ExtensionAPI) {
 			const promoted = memoizedIsPromoted(
 				promotionMemo,
 				sid,
-				trigger(cfg),
+				promoteTrigger(cfg),
 				() => ctx.sessionManager.getBranch(),
 			);
 			if (!promoted) return; // not yet promoted
@@ -334,7 +297,7 @@ export default function (pi: ExtensionAPI) {
 		// the tool catalog promotes). Task routing picks the measured optimum
 		// persona for the classified task; otherwise the minimal persona is
 		// used for every target model.
-		if (cfg.minimalSystemPrompt && isTarget(ctx.model, cfg)) {
+		if (cfg.minimalSystemPrompt && isTargetModel(cfg, ctx.model)) {
 			const taskText = event.prompt?.trim()
 				? event.prompt
 				: taskTextFromEntries(ctx.sessionManager.getBranch());
@@ -357,7 +320,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("message_end", async (event, ctx) => {
 		const cfg = loadConfig(ctx, logger);
 		await ensureRestored(ctx, cfg);
-		if (!isTarget(ctx.model, cfg)) return;
+		if (!isTargetModel(cfg, ctx.model)) return;
 		const msg = event.message as
 			{ role?: string; content?: unknown } | undefined;
 		if (!msg || msg.role !== "assistant") return;
@@ -381,11 +344,11 @@ export default function (pi: ExtensionAPI) {
 		if (!cfg.enabled || cfg.models.length === 0) return;
 		const sid = ctx.sessionManager.getSessionId();
 		if (!sid || !narrowed.has(sid) || restored.has(sid)) return;
-		if (!isTarget(ctx.model, cfg)) return;
+		if (!isTargetModel(cfg, ctx.model)) return;
 		const promoted = memoizedIsPromoted(
 			promotionMemo,
 			sid,
-			trigger(cfg),
+			promoteTrigger(cfg),
 			() => ctx.sessionManager.getBranch(),
 		);
 		if (promoted) return;
@@ -416,10 +379,10 @@ export default function (pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			const cfg = loadConfig(ctx, logger);
 			const model = ctx.model;
-			const matched = isTarget(model, cfg);
+			const matched = isTargetModel(cfg, model);
 			const entries = ctx.sessionManager.getBranch();
-			const promoted = isPromoted(entries, trigger(cfg));
-			const taskMode = taskModeFor(entries);
+			const promoted = isPromoted(entries, promoteTrigger(cfg));
+			const taskMode = classifyTask(taskTextFromEntries(entries));
 			const selected =
 				cfg.bootstrapMode === "two-tool"
 					? selectBootstrapTools(cfg, taskMode, pi.getActiveTools())

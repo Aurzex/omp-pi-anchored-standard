@@ -18,11 +18,13 @@ import {
 	isPositiveInt,
 	isPromoted,
 	isSubagentSession,
+	isTargetModel,
 	lastUserIndex,
 	matchGlob,
 	memoizedIsPromoted,
 	MINIMAL_SYSTEM_PROMPT,
 	modelMatches,
+	promoteTrigger,
 	resolveBootstrap,
 	rewriteSystemPrompt,
 	routerBootstrapTools,
@@ -35,6 +37,7 @@ import {
 	taskTextFromMessages,
 	toolName,
 	trajectoryTextFromMessage,
+	validateRawConfig,
 	zeroAnchorPayload,
 } from "../src/core.ts";
 
@@ -392,6 +395,82 @@ describe("shouldRestoreFullCatalog", () => {
 			}),
 			false,
 		);
+	});
+});
+
+describe("shared config helpers", () => {
+	const cfg = applyDefaults({ models: ["deepseek-v4-pro"] });
+
+	test("isTargetModel matches enabled target models", () => {
+		assert.equal(
+			isTargetModel(cfg, {
+				id: "deepseek-v4-pro",
+				provider: "deepseek",
+			}),
+			true,
+		);
+		assert.equal(
+			isTargetModel(cfg, { id: "gpt-5", provider: "openai" }),
+			false,
+		);
+		assert.equal(isTargetModel(cfg, undefined), false);
+	});
+
+	test("isTargetModel respects the enabled flag", () => {
+		assert.equal(
+			isTargetModel(
+				{ ...cfg, enabled: false },
+				{ id: "deepseek-v4-pro", provider: "deepseek" },
+			),
+			false,
+		);
+	});
+
+	test("promoteTrigger maps zero mode to the assistant-message trigger", () => {
+		assert.equal(promoteTrigger(cfg), "either");
+		assert.equal(
+			promoteTrigger({ ...cfg, bootstrapMode: "zero" }),
+			"assistant-message",
+		);
+		assert.equal(
+			promoteTrigger({
+				...cfg,
+				bootstrapMode: "two-tool",
+				promoteOn: "tool-call",
+			}),
+			"tool-call",
+		);
+	});
+
+	test("validateRawConfig warns about invalid values", () => {
+		const warnings: string[] = [];
+		validateRawConfig(
+			{
+				bootstrapMode: "one-tool",
+				promoteOn: "tool_call",
+				bootstrapMaxTokens: 0,
+			},
+			(message) => warnings.push(message),
+			"anchored-tools",
+		);
+		assert.equal(warnings.length, 3);
+		assert.ok(warnings[0]!.includes("invalid bootstrapMode"));
+		assert.ok(warnings[1]!.includes("invalid promoteOn"));
+		assert.ok(warnings[2]!.includes("invalid bootstrapMaxTokens"));
+	});
+
+	test("validateRawConfig is silent for valid values", () => {
+		const warnings: string[] = [];
+		validateRawConfig(
+			{
+				bootstrapMode: "two-tool",
+				promoteOn: "either",
+				bootstrapMaxTokens: 1024,
+			},
+			(message) => warnings.push(message),
+			"anchored-tools",
+		);
+		assert.equal(warnings.length, 0);
 	});
 });
 

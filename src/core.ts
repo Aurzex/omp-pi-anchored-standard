@@ -58,6 +58,9 @@ export function deepMerge(base: unknown, overrides: unknown): unknown {
 	return result;
 }
 
+const GLOB_REGEX_CACHE = new Map<string, RegExp>();
+const GLOB_REGEX_CACHE_MAX = 256;
+
 /** Minimal '*' glob match (case-insensitive). Non-glob patterns compare exactly. */
 export function matchGlob(pattern: string, value: string): boolean {
 	const p = pattern.toLowerCase();
@@ -67,7 +70,14 @@ export function matchGlob(pattern: string, value: string): boolean {
 	const escaped = pattern
 		.replace(/[.+^${}()|[\]\\]/g, "\\$&")
 		.replace(/\*/g, ".*");
-	return new RegExp(`^${escaped}$`, "i").test(value);
+	let re = GLOB_REGEX_CACHE.get(escaped);
+	if (!re) {
+		re = new RegExp(`^${escaped}$`, "i");
+		GLOB_REGEX_CACHE.set(escaped, re);
+		if (GLOB_REGEX_CACHE.size > GLOB_REGEX_CACHE_MAX)
+			GLOB_REGEX_CACHE.clear();
+	}
+	return re.test(value);
 }
 
 /**
@@ -105,6 +115,12 @@ const REACT_RE =
 const SPEC_RE =
 	/(修复|修一下|调试|重构|维护|排查|报错|出错|崩溃|优化|审查|review|fix|debug|refactor|maintain|repair|broken|break|为什么|异常|故障|迁移|升级|兼容)/gi;
 
+function countMatches(re: RegExp, text: string): number {
+	let count = 0;
+	for (const _ of text.matchAll(re)) count++;
+	return count;
+}
+
 /**
  * Task classifier ported from dsh-router-standard's `classifyTask`
  * (P1-P24): clear keyword evidence picks a stable band (react for
@@ -113,8 +129,8 @@ const SPEC_RE =
  * decides per task.
  */
 export function classifyTask(text: string): TaskMode {
-	const react = [...text.matchAll(REACT_RE)].length;
-	const spec = [...text.matchAll(SPEC_RE)].length;
+	const react = countMatches(REACT_RE, text);
+	const spec = countMatches(SPEC_RE, text);
 	if (react > spec) return "react";
 	if (spec > react) return "spec";
 	return "weak";
@@ -292,12 +308,13 @@ export function filterTools(
 		return { changed: false, tools: payloadTools ?? [], missing: [] };
 	}
 	const available = new Set(payloadTools.map((t) => toolName(t)));
+	const bootstrapSet = new Set(bootstrap);
 	const missing = bootstrap.filter((n) => !available.has(n));
 	if (missing.length > 0) {
 		return { changed: false, tools: payloadTools, missing };
 	}
 	const filtered = payloadTools.filter((t) =>
-		bootstrap.includes(toolName(t) ?? ""),
+		bootstrapSet.has(toolName(t) ?? ""),
 	);
 	const changed = filtered.length !== payloadTools.length;
 	return { changed, tools: changed ? filtered : payloadTools, missing: [] };
@@ -443,9 +460,9 @@ const LETS_RE = /\blet's\b/gi;
 /** Count the `let me` / `we` / `let's` fingerprint across reasoning + text. */
 export function countTrajectory(text: string): TrajectoryCounts {
 	return {
-		letMe: (text.match(LET_ME_RE) ?? []).length,
-		we: (text.match(WE_RE) ?? []).length,
-		lets: (text.match(LETS_RE) ?? []).length,
+		letMe: countMatches(LET_ME_RE, text),
+		we: countMatches(WE_RE, text),
+		lets: countMatches(LETS_RE, text),
 	};
 }
 
@@ -714,6 +731,60 @@ export function shouldRestoreFullCatalog(
 	return !modelMatches(model.id, model.provider, cfg.models);
 }
 
+/** True when `model` is a target for anchoring under `cfg`. */
+export function isTargetModel(
+	cfg: Config,
+	model: { id: string; provider: string } | undefined,
+): boolean {
+	return (
+		!!model &&
+		cfg.enabled &&
+		modelMatches(model.id, model.provider, cfg.models)
+	);
+}
+
+/**
+ * Effective promotion trigger for a config. Zero-mode always promotes on the
+ * first assistant message (the anchor reply), regardless of `promoteOn`.
+ */
+export function promoteTrigger(
+	cfg: Pick<Config, "bootstrapMode" | "promoteOn">,
+): PromoteOn {
+	return cfg.bootstrapMode === "zero" ? "assistant-message" : cfg.promoteOn;
+}
+
+/**
+ * Warn about invalid raw config values once, with the same messages both host
+ * entry points used to duplicate. Invalid values normalize in applyDefaults.
+ */
+export function validateRawConfig(
+	raw: RawConfig,
+	warn: (message: string) => void,
+	extName: string,
+): void {
+	if (
+		raw.bootstrapMode !== undefined &&
+		!isBootstrapMode(raw.bootstrapMode)
+	) {
+		warn(
+			`[${extName}] invalid bootstrapMode ${JSON.stringify(raw.bootstrapMode)}; using "two-tool"`,
+		);
+	}
+	if (raw.promoteOn !== undefined && !isPromoteOn(raw.promoteOn)) {
+		warn(
+			`[${extName}] invalid promoteOn ${JSON.stringify(raw.promoteOn)}; using "either"`,
+		);
+	}
+	if (
+		raw.bootstrapMaxTokens !== undefined &&
+		!isPositiveInt(raw.bootstrapMaxTokens)
+	) {
+		warn(
+			`[${extName}] invalid bootstrapMaxTokens ${JSON.stringify(raw.bootstrapMaxTokens)}; using no cap (default)`,
+		);
+	}
+}
+
 /** Raw `anchoredTools` block as read from the host settings file. */
 export interface RawConfig {
 	enabled?: boolean;
@@ -768,11 +839,11 @@ export function applyDefaults(raw: RawConfig): Config {
 		enabled: raw.enabled ?? DEFAULTS.enabled,
 		models: Array.isArray(raw.models)
 			? [...new Set(raw.models)]
-			: DEFAULTS.models,
+			: [...DEFAULTS.models],
 		bootstrapTools:
 			Array.isArray(raw.bootstrapTools) && raw.bootstrapTools.length > 0
 				? [...new Set(raw.bootstrapTools)]
-				: DEFAULTS.bootstrapTools,
+				: [...DEFAULTS.bootstrapTools],
 		notify: raw.notify ?? DEFAULTS.notify,
 		bootstrapMode: isBootstrapMode(raw.bootstrapMode)
 			? raw.bootstrapMode

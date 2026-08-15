@@ -46,16 +46,16 @@ DeepSeek V4 Pro 对 API 可见的工具目录高度敏感。Project2 评测(Deep
 
 ```text
 src/
-  core.ts   # 共享纯逻辑:toolName / deepMerge / matchGlob / modelMatches / hasToolCallHistory / hasAssistantMessage / isSubagentSession / isPromoted / filterTools / zeroAnchorPayload / stripContextMessages / rewriteSystemPrompt / capMaxTokens / countTrajectory / extractRaw / applyDefaults
+  core.ts   # 共享纯逻辑:toolName / deepMerge / matchGlob / modelMatches / hasToolCallHistory / hasAssistantMessage / isSubagentSession / isPromoted / isTargetModel / promoteTrigger / validateRawConfig / filterTools / zeroAnchorPayload / stripContextMessages / rewriteSystemPrompt / capMaxTokens / countTrajectory / extractRaw / applyDefaults
   omp.ts    # omp 入口:setActiveTools 收窄/恢复 + context 注入 anchor + before_agent_start 替换 systemPrompt + config.yml(YAML)
   pi.ts     # pi 入口:before_provider_request + buildContextEntries() + settings.json
 test/
-  core.test.ts   # node:test 单测(111 例)
+  core.test.ts   # node:test 单测(116 例)
 ```
 
 ## 安装
 
-已发布到 npm(`omp-pi-anchored-standard@0.5.0`)。仓库的 `package.json` 也声明了两个宿主的入口(`omp.extensions` / `pi.extensions`),npm 与 git 安装都会自动加载正确入口。
+已发布到 npm(`omp-pi-anchored-standard@0.6.1`)。仓库的 `package.json` 也声明了两个宿主的入口(`omp.extensions` / `pi.extensions`),npm 与 git 安装都会自动加载正确入口。
 
 ### omp
 
@@ -109,7 +109,7 @@ pi install omp-pi-anchored-standard
 或把仓库加进 `~/.pi/agent/settings.json` 的 `packages`,`/reload` 后自动安装:
 
 ```jsonc
-{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.5.0"] }
+{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.6.1"] }
 ```
 
 默认配置即可用(自动锚定 `deepseek-v4-pro`,纯 anchored-standard;`taskRouting` 默认关闭)。如需覆盖,在全局 `~/.pi/agent/settings.json` + 可信项目的 `.pi/settings.json` 配置(语义同上):
@@ -133,7 +133,7 @@ pi install omp-pi-anchored-standard
 
 改完 `/reload`。
 
-> 版本锁:git 安装可用 `@v0.5.0`(pi)/ `#v0.5.0`(omp);npm 安装默认就是 `latest`(`0.5.0`)。
+> 版本锁:git 安装可用 `@v0.6.1`(pi)/ `#v0.6.1`(omp);npm 安装默认就是 `latest`(`0.6.1`)。
 
 ## 验证
 
