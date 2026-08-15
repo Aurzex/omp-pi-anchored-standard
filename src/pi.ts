@@ -59,15 +59,16 @@ import {
 	deepMerge,
 	extractRaw,
 	filterTools,
-	isPromoted,
 	isSubagentSession,
 	isTargetModel,
-	memoizedIsPromoted,
+	memoizedPromotionPhase,
 	MINIMAL_SYSTEM_PROMPT,
+	promotionPhase,
 	promoteTrigger,
 	rewriteSystemPrompt,
 	routerPersonaFor,
 	selectBootstrapTools,
+	selectZeroBootstrapTools,
 	SessionPromotionMemo,
 	stripContextMessages,
 	taskTextFromEntries,
@@ -161,11 +162,10 @@ export default function (pi: ExtensionAPI) {
 		const cfg = loadConfig(ctx, console.warn);
 		if (!cfg.enabled || cfg.models.length === 0) return;
 		if (!isTargetModel(cfg, ctx.model)) return;
-
 		const sid = ctx.sessionManager.getSessionId();
 		const promoteOn = promoteTrigger(cfg);
 		let entries: EntryLike[] | undefined;
-		const promoted = memoizedIsPromoted(
+		const phase = memoizedPromotionPhase(
 			promotionMemo,
 			sid,
 			promoteOn,
@@ -214,7 +214,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (cfg.bootstrapMode === "zero") {
 			// The anchor reply promotes the session (assistant-message trigger).
-			if (promoted) {
+			if (phase.promoted) {
 				if (sid) maybeNotifyPromoted(sid, ctx.model!.id, cfg, ctx);
 				return changed ? payload : undefined;
 			}
@@ -222,71 +222,116 @@ export default function (pi: ExtensionAPI) {
 			// (pi's context entries have no session_init; kept for parity with omp).
 			if (isSubagentSession(entries ?? []))
 				return changed ? payload : undefined;
-			const result = zeroAnchorPayload(payload, cfg.anchorText);
-			if (!result.payload) return changed ? payload : undefined;
-			if (sid) anchoredSessions.set(sid, true);
-			console.log(
-				`[${EXT_NAME}] anchoring first request for ${ctx.model!.provider}/${ctx.model!.id}: ` +
-					"0 tools (zero-tool anchor)",
-			);
-			return result.payload;
-		}
 
-		// two-tool mode
-		if (promoted) {
-			if (sid) maybeNotifyPromoted(sid, ctx.model!.id, cfg, ctx);
-			// Strip the injected output-budget cap so the host default returns.
-			const capped = capMaxTokens(payload, cfg.bootstrapMaxTokens, true);
+			if (phase.boundary < 0) {
+				const result = zeroAnchorPayload(payload, cfg.anchorText);
+				if (!result.payload) return changed ? payload : undefined;
+				if (sid) anchoredSessions.set(sid, true);
+				console.log(
+					`[${EXT_NAME}] anchoring first request for ${ctx.model!.provider}/${ctx.model!.id}: ` +
+						"0 tools (zero-tool anchor)",
+				);
+				return result.payload;
+			}
+
+			// Post-compaction: no anchor, controlled tool surface.
+			const zeroTools = payload.tools as ToolLike[] | undefined;
+			const zeroAvailable = Array.isArray(zeroTools)
+				? zeroTools
+						.map((t) => toolName(t))
+						.filter((n): n is string => typeof n === "string")
+				: [];
+			if (zeroAvailable.length > 0) {
+				const selected = selectZeroBootstrapTools(
+					zeroAvailable,
+					cfg.compactionTools,
+					phase.boundary,
+				);
+				if (selected.missing.length > 0) {
+					console.warn(
+						`[${EXT_NAME}] zero-mode bootstrap tools missing from catalog: ${selected.missing.join(", ")}; skipping filter`,
+					);
+					return changed ? payload : undefined;
+				}
+				const result = filterTools(zeroTools!, selected.tools);
+				if (result.changed) {
+					payload = { ...payload, tools: result.tools };
+					changed = true;
+					if (sid) anchoredSessions.set(sid, true);
+					console.log(
+						`[${EXT_NAME}] anchoring post-compaction request for ${ctx.model!.provider}/${ctx.model!.id}: ` +
+							`${result.tools.length}/${zeroAvailable.length} tools (${result.tools.map(toolName).join(", ")})`,
+					);
+				}
+			}
+		} else {
+			// two-tool mode
+			if (phase.promoted) {
+				if (sid) maybeNotifyPromoted(sid, ctx.model!.id, cfg, ctx);
+				// Strip the injected output-budget cap so the host default returns.
+				const capped = capMaxTokens(
+					payload,
+					cfg.bootstrapMaxTokens,
+					true,
+				);
+				if (capped.changed) {
+					payload = capped.payload;
+					changed = true;
+				}
+				return changed ? payload : undefined;
+			}
+
+			// First request: cap the output budget before narrowing the catalog.
+			const capped = capMaxTokens(payload, cfg.bootstrapMaxTokens, false);
 			if (capped.changed) {
 				payload = capped.payload;
 				changed = true;
 			}
-			return changed ? payload : undefined;
+
+			// Serialized tool catalog; selectBootstrapTools tries task-routing
+			// first and falls back to the configured bootstrap tools.
+			const tools = payload.tools as ToolLike[] | undefined;
+			if (Array.isArray(tools) && tools.length > 0) {
+				const available = tools
+					.map((t) => toolName(t))
+					.filter((n): n is string => typeof n === "string");
+				const selected = selectBootstrapTools(
+					cfg,
+					taskMode,
+					available,
+					phase.boundary,
+				);
+				if (selected.missing.length > 0) {
+					// Configuration error — fail safe, never strip tools silently.
+					console.warn(
+						`[${EXT_NAME}] bootstrap tools missing from catalog: ${selected.missing.join(", ")}; skipping filter`,
+					);
+					return changed ? payload : undefined;
+				}
+				const result = filterTools(tools, selected.tools);
+				if (result.changed) {
+					payload = { ...payload, tools: result.tools };
+					changed = true;
+					if (sid) anchoredSessions.set(sid, true);
+					console.log(
+						`[${EXT_NAME}] anchoring first request for ${ctx.model!.provider}/${ctx.model!.id}: ` +
+							`${result.tools.length}/${tools.length} tools (${result.tools.map(toolName).join(", ")})` +
+							(selected.used === "router"
+								? ` [task-routing ${taskMode}]`
+								: "") +
+							(phase.boundary >= 0 ? " [post-compaction]" : ""),
+					);
+				}
+			}
 		}
 
-		// First request: cap the output budget before narrowing the catalog.
-		const capped = capMaxTokens(payload, cfg.bootstrapMaxTokens, false);
-		if (capped.changed) {
-			payload = capped.payload;
-			changed = true;
-		}
-
-		// Serialized tool catalog; selectBootstrapTools tries task-routing
-		// first and falls back to the configured bootstrap tools.
-		const tools = payload.tools as ToolLike[] | undefined;
-		if (!Array.isArray(tools) || tools.length === 0)
-			return changed ? payload : undefined;
-
-		const available = tools
-			.map((t) => toolName(t))
-			.filter((n): n is string => typeof n === "string");
-		const selected = selectBootstrapTools(cfg, taskMode, available);
-		if (selected.missing.length > 0) {
-			// Configuration error — fail safe, never strip tools silently.
-			console.warn(
-				`[${EXT_NAME}] bootstrap tools missing from catalog: ${selected.missing.join(", ")}; skipping filter`,
-			);
-			return changed ? payload : undefined;
-		}
-		const result = filterTools(tools, selected.tools);
-		if (result.changed) {
-			payload = { ...payload, tools: result.tools };
-			changed = true;
-			if (sid) anchoredSessions.set(sid, true);
-			console.log(
-				`[${EXT_NAME}] anchoring first request for ${ctx.model!.provider}/${ctx.model!.id}: ` +
-					`${result.tools.length}/${tools.length} tools (${result.tools.map(toolName).join(", ")})` +
-					(selected.used === "router"
-						? ` [task-routing ${taskMode}]`
-						: ""),
-			);
-		}
-		// Strip auto-injected context (AGENTS.md, skill catalog) from the first
-		// request — the omp/pi equivalent of upstream `suppressedContextSources`
-		// (issue #11).
-		if (cfg.minimalSystemPrompt) {
+		// Strip auto-injected context (AGENTS.md, skill catalog) from the
+		// first request — the omp/pi equivalent of upstream
+		// `suppressedContextSources` (issue #11).
+		if (cfg.suppressedContextSources.length > 0) {
 			const stripped = stripContextMessages(
 				payload.messages as PayloadMessage[] | undefined,
+				cfg.suppressedContextSources,
 			);
 			if (stripped) {
 				payload = { ...payload, messages: stripped };
@@ -325,6 +370,12 @@ export default function (pi: ExtensionAPI) {
 		);
 	});
 
+	pi.on("session_compact", (event, ctx) => {
+		const sid = ctx.sessionManager.getSessionId();
+		if (!sid) return;
+		promotionMemo.delete(sid);
+	});
+
 	pi.on("session_shutdown", () => {
 		anchoredSessions.clear();
 		notified.clear();
@@ -341,19 +392,21 @@ export default function (pi: ExtensionAPI) {
 			const model = ctx.model;
 			const matched = isTargetModel(cfg, model);
 			const entries = ctx.sessionManager.buildContextEntries();
-			const promoted = isPromoted(entries, promoteTrigger(cfg));
+			const promotion = promotionPhase(entries, promoteTrigger(cfg));
 			const taskMode = routeTaskMode(
 				taskTextFromEntries(entries),
 				model?.id ?? "",
 			);
-			const phase = !cfg.enabled
+			const status = !cfg.enabled
 				? "disabled"
 				: !matched
 					? "not-targeted"
-					: promoted
+					: promotion.promoted
 						? "promoted (full catalog)"
 						: cfg.bootstrapMode === "zero"
-							? "bootstrap (zero-tool anchor)"
+							? promotion.boundary >= 0
+								? "bootstrap (post-compaction zero-tool)"
+								: "bootstrap (zero-tool anchor)"
 							: `bootstrap (${cfg.bootstrapTools.join(", ")} only)`;
 			const sid = ctx.sessionManager.getSessionId();
 			const traj = sid ? trajectory.get(sid) : undefined;
@@ -364,12 +417,14 @@ export default function (pi: ExtensionAPI) {
 				`target models: ${cfg.models.join(", ") || "(none — no model is anchored)"}`,
 				`task routing: ${cfg.taskRouting ? `on (task=${taskMode})` : "off"}`,
 				`bootstrap tools: ${cfg.bootstrapTools.join(", ")}`,
+				`compaction tools: ${cfg.compactionTools.join(", ") || "(none)"}`,
 				`bootstrap max tokens: ${cfg.bootstrapMaxTokens ?? "off (default)"}`,
 				`trajectory: ${traj ? `we ${traj.we}, let's ${traj.lets}, let me ${traj.letMe}` : "n/a"}`,
 				`minimal system prompt: ${cfg.minimalSystemPrompt ? "on (DSH/route persona)" : "off (host default)"}`,
+				`suppressed context sources: ${cfg.suppressedContextSources.join(", ") || "(disabled)"}`,
 				`current model: ${model ? `${model.provider}/${model.id}` : "n/a"}`,
 				`model matched: ${matched ? "yes" : "no"}`,
-				`phase: ${phase}`,
+				`phase: ${status}`,
 			];
 			ctx.ui.notify(lines.join("\n"), "info");
 		},

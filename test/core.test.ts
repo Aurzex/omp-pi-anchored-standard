@@ -24,15 +24,17 @@ import {
 	memoizedIsPromoted,
 	MINIMAL_SYSTEM_PROMPT,
 	modelMatches,
-	promoteTrigger,
 	normalizeShellTools,
+	platformShell,
+	promoteTrigger,
+	promotionPhase,
 	resolveBootstrap,
 	rewriteSystemPrompt,
-	platformShell,
 	routerPersonaFor,
-	routeTaskMode,
 	routerBootstrapTools,
+	routeTaskMode,
 	selectBootstrapTools,
+	selectZeroBootstrapTools,
 	SessionPromotionMemo,
 	shouldRestoreFullCatalog,
 	stripContextMessages,
@@ -42,6 +44,7 @@ import {
 	trajectoryTextFromMessage,
 	validateRawConfig,
 	zeroAnchorPayload,
+	type RawConfig,
 } from "../src/core.ts";
 
 describe("toolName", () => {
@@ -281,6 +284,26 @@ describe("isPromoted", () => {
 	});
 });
 
+test("promotionPhase is epoch-aware across compactions", () => {
+	const assistant = {
+		type: "message",
+		message: { role: "assistant", content: [{ type: "text" }] },
+	};
+	const compaction = { type: "compaction" };
+	assert.deepStrictEqual(
+		promotionPhase([assistant, compaction], "assistant-message"),
+		{ boundary: 1, promoted: false },
+	);
+	assert.deepStrictEqual(
+		promotionPhase([assistant, compaction, assistant], "assistant-message"),
+		{ boundary: 1, promoted: true },
+	);
+	assert.deepStrictEqual(promotionPhase([], "either"), {
+		boundary: -1,
+		promoted: false,
+	});
+});
+
 describe("SessionPromotionMemo / memoizedIsPromoted", () => {
 	test("memo hit returns true without rescanning entries", () => {
 		const memo = new SessionPromotionMemo();
@@ -330,6 +353,15 @@ describe("SessionPromotionMemo / memoizedIsPromoted", () => {
 		memo.add("s");
 		memo.clear();
 		assert.equal(memo.has("s"), false);
+	});
+
+	test("delete forgets one session (compaction reset)", () => {
+		const memo = new SessionPromotionMemo();
+		memo.add("s1");
+		memo.add("s2");
+		memo.delete("s1");
+		assert.equal(memo.has("s1"), false);
+		assert.equal(memo.has("s2"), true);
 	});
 
 	test("missing sid disables the memo", () => {
@@ -475,6 +507,17 @@ describe("shared config helpers", () => {
 		);
 		assert.equal(warnings.length, 0);
 	});
+
+	test("validateRawConfig warns about unknown keys", () => {
+		const warnings: string[] = [];
+		validateRawConfig(
+			{ suppressContext: true } as unknown as RawConfig,
+			(message) => warnings.push(message),
+			"anchored-tools",
+		);
+		assert.equal(warnings.length, 1);
+		assert.ok(warnings[0]!.includes("unknown anchoredTools key(s)"));
+	});
 });
 
 describe("resolveBootstrap", () => {
@@ -619,6 +662,8 @@ describe("applyDefaults", () => {
 		minimalSystemPrompt: true,
 		bootstrapMaxTokens: undefined,
 		taskRouting: false,
+		suppressedContextSources: ["skill-catalog", "agent-instructions"],
+		compactionTools: [],
 	};
 
 	test("empty raw config resolves to DEFAULTS", () => {
@@ -664,6 +709,8 @@ describe("applyDefaults", () => {
 			minimalSystemPrompt: false,
 			bootstrapMaxTokens: 4096,
 			taskRouting: false,
+			suppressedContextSources: ["skill-catalog", "agent-instructions"],
+			compactionTools: [],
 		});
 	});
 	test("invalid bootstrapMode and promoteOn normalize to defaults", () => {
@@ -695,6 +742,32 @@ describe("applyDefaults", () => {
 	});
 	test("empty anchorText falls back to the default anchor", () => {
 		assert.equal(applyDefaults({ anchorText: "" }).anchorText, ANCHOR_TEXT);
+	});
+
+	test("empty suppressedContextSources disables the context filter", () => {
+		assert.deepStrictEqual(
+			applyDefaults({ suppressedContextSources: [] })
+				.suppressedContextSources,
+			[],
+		);
+	});
+
+	test("suppressedContextSources filters invalid entries", () => {
+		assert.deepStrictEqual(
+			applyDefaults({
+				suppressedContextSources: ["skill-catalog", "", "other"],
+			}).suppressedContextSources,
+			["skill-catalog", "other"],
+		);
+	});
+
+	test("compactionTools defaults to empty and deduplicates", () => {
+		assert.deepStrictEqual(applyDefaults({}).compactionTools, []);
+		assert.deepStrictEqual(
+			applyDefaults({ compactionTools: ["read", "read", "edit"] })
+				.compactionTools,
+			["read", "edit"],
+		);
 	});
 });
 
@@ -838,6 +911,55 @@ describe("task routing helpers", () => {
 		assert.equal(selected.used, "configured");
 		assert.deepStrictEqual(selected.tools, ["pwsh", "edit"]);
 		assert.deepStrictEqual(selected.missing, []);
+	});
+
+	test("selectBootstrapTools: appends compactionTools after a compaction", () => {
+		const selected = selectBootstrapTools(
+			{
+				bootstrapTools: ["bash", "edit"],
+				taskRouting: false,
+				compactionTools: ["read"],
+			},
+			"weak",
+			["bash", "edit", "read", "write"],
+			1,
+		);
+		assert.equal(selected.used, "configured");
+		assert.deepStrictEqual(selected.tools, ["bash", "edit", "read"]);
+		assert.deepStrictEqual(selected.missing, []);
+	});
+
+	test("selectBootstrapTools: reports missing compactionTools", () => {
+		const selected = selectBootstrapTools(
+			{
+				bootstrapTools: ["bash", "edit"],
+				taskRouting: false,
+				compactionTools: ["glob"],
+			},
+			"weak",
+			["bash", "edit"],
+			1,
+		);
+		assert.deepStrictEqual(selected.missing, ["glob"]);
+	});
+
+	test("selectZeroBootstrapTools: first request is zero, post-compaction exposes work set", () => {
+		assert.deepStrictEqual(
+			selectZeroBootstrapTools(["bash", "edit"], ["read"], -1),
+			{ tools: [], missing: [] },
+		);
+		assert.deepStrictEqual(
+			selectZeroBootstrapTools(["bash", "edit"], [], 1),
+			{ tools: [], missing: [] },
+		);
+		assert.deepStrictEqual(
+			selectZeroBootstrapTools(["bash", "edit", "read"], ["read"], 1),
+			{ tools: ["bash", "read"], missing: [] },
+		);
+		assert.deepStrictEqual(
+			selectZeroBootstrapTools(["bash", "edit"], ["glob"], 1),
+			{ tools: [], missing: ["glob"] },
+		);
 	});
 
 	test("routeTaskMode: Flash always routes weak, others use keywords", () => {
@@ -1200,6 +1322,32 @@ describe("stripContextMessages", () => {
 		assert.ok(stripped);
 		assert.equal(stripped[0]!.role, "developer");
 		assert.equal(stripped[1]!.content, "extra context");
+	});
+
+	test("empty suppressedSources disables the filter", () => {
+		const messages = [
+			{ role: "system", content: "host" },
+			{ role: "user", content: "AGENTS.md" },
+			{ role: "user", content: "real task" },
+		];
+		assert.equal(stripContextMessages(messages, []), undefined);
+	});
+
+	test("filters by source.kind when messages carry it", () => {
+		const messages = [
+			{ role: "system", content: "s" },
+			{
+				role: "user",
+				content: "workspace digest",
+				source: { kind: "agent-instructions" },
+			},
+			{ role: "user", content: "real task", source: { kind: "user" } },
+		];
+		const stripped = stripContextMessages(messages);
+		assert.deepStrictEqual(stripped, [
+			{ role: "system", content: "s" },
+			{ role: "user", content: "real task", source: { kind: "user" } },
+		]);
 	});
 });
 

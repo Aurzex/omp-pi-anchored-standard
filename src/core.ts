@@ -225,6 +225,59 @@ export function isPromoteOn(value: unknown): value is PromoteOn {
 	);
 }
 
+export interface PromotionPhase {
+	/** Index of the last compaction entry, or -1 before any compaction. */
+	boundary: number;
+	/** True when a durable promotion signal exists after the boundary. */
+	promoted: boolean;
+}
+
+function isToolCallEntry(e: EntryLike): boolean {
+	const m = e.message;
+	if (!m) return false;
+	if (m.role === "toolResult") return true;
+	if (m.role === "assistant" && Array.isArray(m.content)) {
+		return m.content.some((c) => c?.type === "toolCall");
+	}
+	return false;
+}
+
+function isAssistantEntry(e: EntryLike): boolean {
+	return e.message?.role === "assistant";
+}
+
+function isPromotionSignal(e: EntryLike, promoteOn: PromoteOn): boolean {
+	if (promoteOn === "tool-call") return isToolCallEntry(e);
+	if (promoteOn === "assistant-message") return isAssistantEntry(e);
+	return isToolCallEntry(e) || isAssistantEntry(e);
+}
+
+/**
+ * Epoch-aware promotion phase, ported from upstream `compaction-epoch.mjs`:
+ * a compaction rewrites the model-visible surface, so only a durable
+ * promotion signal recorded AFTER the last `compaction` entry counts as
+ * promoted. Before any compaction the boundary is -1, which preserves the
+ * original one-shot semantics.
+ */
+export function promotionPhase(
+	entries: EntryLike[],
+	promoteOn: PromoteOn,
+): PromotionPhase {
+	let boundary = -1;
+	let promoted = false;
+	for (let i = 0; i < entries.length; i++) {
+		const e = entries[i];
+		if (!e) continue;
+		if (e.type === "compaction") {
+			boundary = i;
+			promoted = false;
+			continue;
+		}
+		if (!promoted && isPromotionSignal(e, promoteOn)) promoted = true;
+	}
+	return { boundary, promoted };
+}
+
 /**
  * Whether the session has reached the promoted (full-catalog) phase, per the
  * configured trigger. Matches upstream's `PROMOTE_EVENTS`:
@@ -236,16 +289,14 @@ export function isPromoted(
 	entries: EntryLike[],
 	promoteOn: PromoteOn,
 ): boolean {
-	if (promoteOn === "tool-call") return hasToolCallHistory(entries);
-	if (promoteOn === "assistant-message") return hasAssistantMessage(entries);
-	return hasToolCallHistory(entries) || hasAssistantMessage(entries);
+	return promotionPhase(entries, promoteOn).promoted;
 }
 
 /**
- * Promotion decisions are append-only per session. A session once found
- * promoted stays promoted for the rest of the process, so later checks can
- * skip the durable-event scan entirely (mirrors upstream
- * dsh-anchored-standard's memoized `promoted` Set).
+ * Promotion decisions are memoized per session for this process. A session
+ * once found promoted stays promoted until the next compaction boundary —
+ * the `session_compact` event resets the memo so the post-compaction request
+ * is treated as a "second first request" (upstream `compaction-epoch.mjs`).
  */
 export class SessionPromotionMemo {
 	#sessions = new Set<string>();
@@ -255,14 +306,37 @@ export class SessionPromotionMemo {
 		return this.#sessions.has(sid);
 	}
 
-	/** Record a session as promoted (append-only). */
+	/** Record a session as promoted. */
 	add(sid: string): void {
 		this.#sessions.add(sid);
+	}
+
+	/** Forget a session's promotion (compaction boundary). */
+	delete(sid: string): void {
+		this.#sessions.delete(sid);
 	}
 
 	clear(): void {
 		this.#sessions.clear();
 	}
+}
+
+/**
+ * Memoized promotion-phase check. `getEntries` is called only when the
+ * session has not already been recorded as promoted; on a memo hit the scan
+ * is skipped and `{ boundary: -1, promoted: true }` is returned. A missing
+ * session id disables the memo.
+ */
+export function memoizedPromotionPhase(
+	memo: SessionPromotionMemo,
+	sid: string | undefined,
+	promoteOn: PromoteOn,
+	getEntries: () => EntryLike[],
+): PromotionPhase {
+	if (sid && memo.has(sid)) return { boundary: -1, promoted: true };
+	const phase = promotionPhase(getEntries(), promoteOn);
+	if (phase.promoted && sid) memo.add(sid);
+	return phase;
 }
 
 /**
@@ -276,10 +350,7 @@ export function memoizedIsPromoted(
 	promoteOn: PromoteOn,
 	getEntries: () => EntryLike[],
 ): boolean {
-	if (sid && memo.has(sid)) return true;
-	const promoted = isPromoted(getEntries(), promoteOn);
-	if (promoted && sid) memo.add(sid);
-	return promoted;
+	return memoizedPromotionPhase(memo, sid, promoteOn, getEntries).promoted;
 }
 
 export interface FilterResult {
@@ -336,6 +407,7 @@ export function filterTools(
 export interface PayloadMessage {
 	role?: string;
 	content?: unknown;
+	source?: { kind?: string };
 }
 
 /** Index of the last user message in a payload messages array, or -1. */
@@ -420,23 +492,36 @@ export function zeroAnchorPayload(
 	return { payload: next, anchored: true };
 }
 
+/** Automatic context sources stripped by default (upstream issue #11). */
+export const DEFAULT_SUPPRESSED_SOURCES = [
+	"skill-catalog",
+	"agent-instructions",
+];
+
 /**
- * Strip auto-injected context from the FIRST request by keeping only the
- * system/developer prompt and the last user message. This is the omp/pi
- * equivalent of upstream `suppressedContextSources` (issue #11): instead of
- * identifying injected messages by `source.kind` (which omp/pi messages lack),
- * it drops EVERYTHING except the system prompt and the user's actual message,
- * so workspace instructions, AGENTS.md/CLAUDE.md digests, and the skill
- * catalog never reach the first request.
+ * Strip auto-injected context from the FIRST request. This is the omp/pi
+ * port of upstream `suppressedContextSources` (issue #11):
  *
- * Returns undefined when there is nothing to strip: no user message, or the
- * conversation already contains an assistant/toolResult reply (not the first
- * request — rebuilding a multi-turn history would drop the model's own turns).
+ * - When messages carry `source.kind` (DSH-like payloads), filter exactly by
+ *   the suppressed kinds — user-initiated skill gestures and other sources
+ *   survive.
+ * - When messages lack `source.kind` (omp/pi payloads), fall back to
+ *   rebuilding the message list as `[system/developer, last user]`, so
+ *   workspace instructions, AGENTS.md/CLAUDE.md digests, and the skill
+ *   catalog never reach the first request.
+ * - An empty `suppressedSources` array disables the filter while keeping the
+ *   tool bootstrap.
+ *
+ * Returns undefined when there is nothing to strip: no user message, a
+ * conversation that already contains an assistant/toolResult reply (not the
+ * first request), or the filter is disabled.
  */
 export function stripContextMessages(
 	messages: PayloadMessage[] | undefined,
+	suppressedSources: string[] = DEFAULT_SUPPRESSED_SOURCES,
 ): PayloadMessage[] | undefined {
 	if (!Array.isArray(messages) || messages.length === 0) return undefined;
+	if (suppressedSources.length === 0) return undefined;
 	const hasReply = messages.some((m) => {
 		const r = m?.role;
 		return r === "assistant" || r === "toolResult" || r === "tool";
@@ -444,6 +529,21 @@ export function stripContextMessages(
 	if (hasReply) return undefined;
 	const userIdx = lastUserIndex(messages);
 	if (userIdx < 0) return undefined;
+
+	const hasSourceKind = messages.some((m) => {
+		const kind = m?.source?.kind;
+		return typeof kind === "string" && kind.length > 0;
+	});
+	if (hasSourceKind) {
+		const kept = messages.filter((m) => {
+			const kind = m?.source?.kind;
+			return (
+				typeof kind !== "string" || !suppressedSources.includes(kind)
+			);
+		});
+		return kept.length === messages.length ? undefined : kept;
+	}
+
 	const systemIdx = messages.findIndex(
 		(m) => m?.role === "system" || m?.role === "developer",
 	);
@@ -631,30 +731,88 @@ export function normalizeShellTools(
  * missing from the catalog, the configured `bootstrapTools` are used as the
  * fallback, and only if those are missing too is the missing set reported
  * (the caller then fails safe without narrowing).
+ *
+ * After a compaction (`boundary >= 0`) the controlled phase additionally
+ * exposes `compactionTools` so mid-task work can continue until a NEW durable
+ * promotion signal exists past the boundary (upstream `compactionTools`).
  */
 export function selectBootstrapTools(
-	cfg: { bootstrapTools: string[]; taskRouting: boolean },
+	cfg: {
+		bootstrapTools: string[];
+		taskRouting: boolean;
+		compactionTools?: string[];
+	},
 	mode: TaskMode,
 	available: string[],
+	boundary = -1,
 ): { tools: string[]; missing: string[]; used: "router" | "configured" } {
-	if (cfg.taskRouting) {
-		const desired = withPlatformShell(
-			routerBootstrapTools(mode),
-			available,
-		);
-		const routerResolved = resolveBootstrap(available, desired);
-		if (routerResolved.missing.length === 0) {
-			return { tools: routerResolved.tools, missing: [], used: "router" };
+	const compactionTools = cfg.compactionTools ?? [];
+	const configured = (): {
+		tools: string[];
+		missing: string[];
+		used: "router" | "configured";
+	} => {
+		if (cfg.taskRouting) {
+			const desired = withPlatformShell(
+				routerBootstrapTools(mode),
+				available,
+			);
+			const routerResolved = resolveBootstrap(available, desired);
+			if (routerResolved.missing.length === 0) {
+				return {
+					tools: routerResolved.tools,
+					missing: [],
+					used: "router",
+				};
+			}
 		}
+		const resolved = resolveBootstrap(
+			available,
+			normalizeShellTools(cfg.bootstrapTools, available),
+		);
+		return {
+			tools: resolved.tools,
+			missing: resolved.missing,
+			used: "configured",
+		};
+	};
+
+	const base = configured();
+	if (base.missing.length > 0) return base;
+	if (boundary >= 0 && compactionTools.length > 0) {
+		const combined = resolveBootstrap(available, [
+			...new Set([...base.tools, ...compactionTools]),
+		]);
+		if (combined.missing.length > 0) {
+			return { tools: [], missing: combined.missing, used: base.used };
+		}
+		return { tools: combined.tools, missing: [], used: base.used };
 	}
-	const configured = resolveBootstrap(
-		available,
-		normalizeShellTools(cfg.bootstrapTools, available),
-	);
+	return base;
+}
+
+/**
+ * Zero-mode tool surface. The very first request (`boundary < 0`) carries no
+ * tools at all. After a compaction the model is mid-task and needs to keep
+ * working: if `compactionTools` is configured, expose the platform shells +
+ * that work set; otherwise stay on the zero-tool surface until a new durable
+ * assistant message promotes the session (upstream zero-tool-bootstrap).
+ */
+export function selectZeroBootstrapTools(
+	available: string[],
+	compactionTools: string[],
+	boundary: number,
+): { tools: string[]; missing: string[] } {
+	if (boundary < 0 || compactionTools.length === 0) {
+		return { tools: [], missing: [] };
+	}
+	const shells = available.filter((n) => n === "pwsh" || n === "bash");
+	if (shells.length === 0) return { tools: [], missing: ["bash/pwsh"] };
+	const missing = compactionTools.filter((n) => !available.includes(n));
+	if (missing.length > 0) return { tools: [], missing };
 	return {
-		tools: configured.tools,
-		missing: configured.missing,
-		used: "configured",
+		tools: [...new Set([...shells, ...compactionTools])],
+		missing: [],
 	};
 }
 
@@ -760,7 +918,6 @@ export function isPositiveInt(value: unknown): value is number {
 	);
 }
 
-/** Resolved extension configuration. */
 export interface Config {
 	enabled: boolean;
 	models: string[];
@@ -772,6 +929,8 @@ export interface Config {
 	minimalSystemPrompt: boolean;
 	bootstrapMaxTokens: number | undefined;
 	taskRouting: boolean;
+	suppressedContextSources: string[];
+	compactionTools: string[];
 }
 
 /**
@@ -812,6 +971,29 @@ export function promoteTrigger(
 	return cfg.bootstrapMode === "zero" ? "assistant-message" : cfg.promoteOn;
 }
 
+/** Every config key this extension accepts — anything else is a typo. */
+export const ALLOWED_RAW_KEYS = [
+	"enabled",
+	"models",
+	"bootstrapTools",
+	"notify",
+	"bootstrapMode",
+	"promoteOn",
+	"anchorText",
+	"minimalSystemPrompt",
+	"bootstrapMaxTokens",
+	"taskRouting",
+	"suppressedContextSources",
+	"compactionTools",
+] as const;
+
+function isNonEmptyStringArray(value: unknown): value is string[] {
+	return (
+		Array.isArray(value) &&
+		value.every((item) => typeof item === "string" && item.length > 0)
+	);
+}
+
 /**
  * Warn about invalid raw config values once, with the same messages both host
  * entry points used to duplicate. Invalid values normalize in applyDefaults.
@@ -821,6 +1003,14 @@ export function validateRawConfig(
 	warn: (message: string) => void,
 	extName: string,
 ): void {
+	const unknown = Object.keys(raw).filter(
+		(key) => !(ALLOWED_RAW_KEYS as readonly string[]).includes(key),
+	);
+	if (unknown.length > 0) {
+		warn(
+			`[${extName}] unknown anchoredTools key(s) ${unknown.join(", ")}; allowed keys: ${ALLOWED_RAW_KEYS.join(", ")}`,
+		);
+	}
 	if (
 		raw.bootstrapMode !== undefined &&
 		!isBootstrapMode(raw.bootstrapMode)
@@ -842,6 +1032,29 @@ export function validateRawConfig(
 			`[${extName}] invalid bootstrapMaxTokens ${JSON.stringify(raw.bootstrapMaxTokens)}; using no cap (default)`,
 		);
 	}
+	if (
+		raw.suppressedContextSources !== undefined &&
+		!Array.isArray(raw.suppressedContextSources)
+	) {
+		warn(
+			`[${extName}] invalid suppressedContextSources ${JSON.stringify(raw.suppressedContextSources)}; using default sources`,
+		);
+	} else if (
+		Array.isArray(raw.suppressedContextSources) &&
+		!isNonEmptyStringArray(raw.suppressedContextSources)
+	) {
+		warn(
+			`[${extName}] suppressedContextSources must contain only non-empty strings; invalid entries ignored`,
+		);
+	}
+	if (
+		raw.compactionTools !== undefined &&
+		!isNonEmptyStringArray(raw.compactionTools)
+	) {
+		warn(
+			`[${extName}] invalid compactionTools ${JSON.stringify(raw.compactionTools)}; using no compaction work set (default)`,
+		);
+	}
 }
 
 /** Raw `anchoredTools` block as read from the host settings file. */
@@ -856,6 +1069,8 @@ export interface RawConfig {
 	minimalSystemPrompt?: boolean;
 	bootstrapMaxTokens?: number;
 	taskRouting?: boolean;
+	suppressedContextSources?: string[];
+	compactionTools?: string[];
 }
 
 /** Fixed anchor text from upstream zero-anchored-standard (config-overridable). */
@@ -872,6 +1087,8 @@ export const DEFAULTS: Config = {
 	minimalSystemPrompt: true,
 	bootstrapMaxTokens: undefined,
 	taskRouting: false,
+	suppressedContextSources: [...DEFAULT_SUPPRESSED_SOURCES],
+	compactionTools: [],
 };
 
 /**
@@ -920,5 +1137,18 @@ export function applyDefaults(raw: RawConfig): Config {
 			? raw.bootstrapMaxTokens
 			: undefined,
 		taskRouting: raw.taskRouting ?? DEFAULTS.taskRouting,
+		suppressedContextSources: Array.isArray(raw.suppressedContextSources)
+			? [
+					...new Set(
+						raw.suppressedContextSources.filter(
+							(s): s is string =>
+								typeof s === "string" && s.length > 0,
+						),
+					),
+				]
+			: [...DEFAULTS.suppressedContextSources],
+		compactionTools: isNonEmptyStringArray(raw.compactionTools)
+			? [...new Set(raw.compactionTools)]
+			: [],
 	};
 }

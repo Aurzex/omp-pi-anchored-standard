@@ -72,14 +72,16 @@ import {
 	countTrajectory,
 	deepMerge,
 	extractRaw,
-	isPromoted,
+	promotionPhase,
 	isSubagentSession,
 	isTargetModel,
 	memoizedIsPromoted,
+	memoizedPromotionPhase,
 	MINIMAL_SYSTEM_PROMPT,
 	promoteTrigger,
 	routerPersonaFor,
 	selectBootstrapTools,
+	selectZeroBootstrapTools,
 	SessionPromotionMemo,
 	shouldRestoreFullCatalog,
 	stripContextMessages,
@@ -201,21 +203,35 @@ export default function (pi: ExtensionAPI) {
 		const sid = ctx.sessionManager.getSessionId();
 		if (!sid || narrowed.has(sid)) return;
 		const branch = ctx.sessionManager.getBranch();
-		const promoted = memoizedIsPromoted(
+		const phase = memoizedPromotionPhase(
 			promotionMemo,
 			sid,
 			promoteTrigger(cfg),
 			() => branch,
 		);
-		if (promoted) return; // already promoted (resume/reload)
-		if (cfg.bootstrapMode === "zero" && isSubagentSession(branch)) return; // subagents full catalog
+		if (phase.promoted) return; // already promoted (resume/reload)
+		// Upstream: subagents always see the full catalog from their very
+		// first request (delegationDepth > 0). omp marks them with a
+		// `session_init` entry.
+		if (isSubagentSession(branch)) return;
 
 		const full = pi.getActiveTools();
 		let target: string[];
 		let mode: TaskMode = "weak";
 		let routed = false;
 		if (cfg.bootstrapMode === "zero") {
-			target = [];
+			const resolved = selectZeroBootstrapTools(
+				full,
+				cfg.compactionTools,
+				phase.boundary,
+			);
+			if (resolved.missing.length > 0) {
+				logger.warn(
+					`[${EXT_NAME}] zero-mode bootstrap tools missing from catalog: ${resolved.missing.join(", ")}; skipping filter`,
+				);
+				return;
+			}
+			target = resolved.tools;
 		} else {
 			// `before_agent_start` carries the submitted prompt; session_start
 			// has none, so task routing sessions defer to before_agent_start.
@@ -229,7 +245,12 @@ export default function (pi: ExtensionAPI) {
 				cfg.taskRouting && taskText.trim()
 					? cfg
 					: { ...cfg, taskRouting: false };
-			const resolved = selectBootstrapTools(routingCfg, mode, full);
+			const resolved = selectBootstrapTools(
+				routingCfg,
+				mode,
+				full,
+				phase.boundary,
+			);
 			if (resolved.missing.length > 0) {
 				// Configuration error — fail safe, never strip tools silently.
 				logger.warn(
@@ -247,9 +268,10 @@ export default function (pi: ExtensionAPI) {
 		logger.info(
 			`[${EXT_NAME}] anchoring first request for ${ctx.model!.provider}/${ctx.model!.id}: ` +
 				(cfg.bootstrapMode === "zero"
-					? "0 tools (zero-tool anchor)"
+					? `${target.length} tools (zero-tool${phase.boundary >= 0 ? " post-compaction" : " anchor"})`
 					: `${target.length}/${full.length} tools (${target.join(", ")})` +
-						(routed ? ` [task-routing ${mode}]` : "")),
+						(routed ? ` [task-routing ${mode}]` : "") +
+						(phase.boundary >= 0 ? " [post-compaction]" : "")),
 		);
 	};
 
@@ -348,23 +370,38 @@ export default function (pi: ExtensionAPI) {
 		const sid = ctx.sessionManager.getSessionId();
 		if (!sid || !narrowed.has(sid) || restored.has(sid)) return;
 		if (!isTargetModel(cfg, ctx.model)) return;
-		const promoted = memoizedIsPromoted(
+		const phase = memoizedPromotionPhase(
 			promotionMemo,
 			sid,
 			promoteTrigger(cfg),
 			() => ctx.sessionManager.getBranch(),
 		);
-		if (promoted) return;
+		if (phase.promoted) return;
 		const messages = event.messages as unknown as PayloadMessage[];
-		if (cfg.bootstrapMode === "zero") {
+		if (cfg.bootstrapMode === "zero" && phase.boundary < 0) {
 			const replaced = anchorPayloadMessages(messages, cfg.anchorText);
 			if (replaced) return { messages: replaced as AgentMessage[] };
 			return;
 		}
-		if (cfg.minimalSystemPrompt) {
-			const stripped = stripContextMessages(messages);
+		if (cfg.suppressedContextSources.length > 0) {
+			const stripped = stripContextMessages(
+				messages,
+				cfg.suppressedContextSources,
+			);
 			if (stripped) return { messages: stripped as AgentMessage[] };
 		}
+	});
+
+	// A compaction rewrites the model-visible surface: drop the per-session
+	// memo and narrowing state so the next request is treated as a "second
+	// first request" (upstream compaction-epoch.mjs).
+	pi.on("session_compact", (event, ctx) => {
+		const sid = ctx.sessionManager.getSessionId();
+		if (!sid) return;
+		promotionMemo.delete(sid);
+		narrowed.delete(sid);
+		restored.delete(sid);
+		fullTools.delete(sid);
 	});
 
 	pi.on("session_shutdown", () => {
@@ -384,23 +421,30 @@ export default function (pi: ExtensionAPI) {
 			const model = ctx.model;
 			const matched = isTargetModel(cfg, model);
 			const entries = ctx.sessionManager.getBranch();
-			const promoted = isPromoted(entries, promoteTrigger(cfg));
+			const promotion = promotionPhase(entries, promoteTrigger(cfg));
 			const taskMode = routeTaskMode(
 				taskTextFromEntries(entries),
 				model?.id ?? "",
 			);
 			const selected =
 				cfg.bootstrapMode === "two-tool"
-					? selectBootstrapTools(cfg, taskMode, pi.getActiveTools())
+					? selectBootstrapTools(
+							cfg,
+							taskMode,
+							pi.getActiveTools(),
+							promotion.boundary,
+						)
 					: undefined;
-			const phase = !cfg.enabled
+			const status = !cfg.enabled
 				? "disabled"
 				: !matched
 					? "not-targeted"
-					: promoted
+					: promotion.promoted
 						? "promoted (full catalog)"
 						: cfg.bootstrapMode === "zero"
-							? "bootstrap (zero-tool anchor)"
+							? promotion.boundary >= 0
+								? "bootstrap (post-compaction zero-tool)"
+								: "bootstrap (zero-tool anchor)"
 							: `bootstrap (${selected?.tools.join(", ") ?? cfg.bootstrapTools.join(", ")} only)`;
 			const sid = ctx.sessionManager.getSessionId();
 			const traj = sid ? trajectory.get(sid) : undefined;
@@ -411,12 +455,14 @@ export default function (pi: ExtensionAPI) {
 				`target models: ${cfg.models.join(", ") || "(none — no model is anchored)"}`,
 				`task routing: ${cfg.taskRouting ? `on (task=${taskMode})` : "off"}`,
 				`bootstrap tools: ${selected ? `${selected.tools.join(", ")} (${selected.used})` : cfg.bootstrapTools.join(", ")}`,
+				`compaction tools: ${cfg.compactionTools.join(", ") || "(none)"}`,
 				`bootstrap max tokens: ${cfg.bootstrapMaxTokens ?? "off (default)"}${cfg.bootstrapMode === "two-tool" ? " (pi only)" : ""}`,
 				`trajectory: ${traj ? `we ${traj.we}, let's ${traj.lets}, let me ${traj.letMe}` : "n/a"}`,
 				`minimal system prompt: ${cfg.minimalSystemPrompt ? "on (DSH/route persona)" : "off (host default)"}`,
+				`suppressed context sources: ${cfg.suppressedContextSources.join(", ") || "(disabled)"}`,
 				`current model: ${model ? `${model.provider}/${model.id}` : "n/a"}`,
 				`model matched: ${matched ? "yes" : "no"}`,
-				`phase: ${phase}`,
+				`phase: ${status}`,
 			];
 			ctx.ui.notify(lines.join("\n"), "info");
 		},

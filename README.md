@@ -24,34 +24,35 @@ DeepSeek V4 Pro 对 API 可见的工具目录高度敏感。Project2 评测(Deep
 
 - **`promoteOn`(默认 `either`)**:`tool-call` = 第一个持久 tool call;`assistant-message` = 第一个持久 assistant 消息;`either` = 两者先到者。默认 `either` 避免"纯文本首答把会话永远困在 bootstrap"(上游的默认选择;pi 移植的 `tool-call` 行为可通过配置恢复)。
 - 失败的 tool call 也算持久信号 → 提升。
-- 目录每会话**只变一次**(一次 request-prefix cache 断层)。
+- 目录每个锚定阶段**只变一次**(一次 request-prefix cache 断层);compaction 后作为「第二个首请求」重新收窄。
 - 阶段从**持久会话条目**推导(`getBranch()` / `buildContextEntries()`),`/resume`、`/reload` 自动保留。
 - 配置里的 bootstrap 工具名在目录里缺失 → **fail-safe**:跳过过滤并告警,绝不静默剥工具。
 - 非目标模型完全不受影响;`models` 默认 `["deepseek-v4-pro"]`(零配置即可用),显式配置 `[]` 才不锚定任何模型。
-- 两阶段提升决策按会话 id 在进程内记忆,扫描只做一次。
+- 两阶段提升决策按会话 id 在进程内记忆,扫描只做一次;`session_compact` 后重置该会话的 memo(compaction epoch,对齐上游 `compaction-epoch.mjs`)。
 - **宿主机制不同**(行为一致):omp 侧通过 `pi.setActiveTools()` 原生收窄/恢复活动工具集(`before_provider_request` 的 payload 替换在 openai-completions 传输层被丢弃,不可靠),zero 模式 anchor 消息经 `context` 事件注入(序列化前生效,所有传输层都遵守);pi 侧沿用 pi 移植的 `before_provider_request` payload 过滤(pi 端口已验证有效)。
 - **`minimalSystemPrompt`(默认 `true`)**:目标模型的系统提示被整体改写为 DSH minimal 人设(`You are a helpful software engineer assistant.`,与上游 Harness `minimal` preset 逐字节一致)。这是与工具目录**同级**的轨迹锚点:改写措辞会破坏 `We need` 推理风格,故永久生效(整段会话),只有工具目录提升。设 `false` 保留宿主默认系统提示。omp 经 `before_agent_start` 返回 `systemPrompt` 替换;pi 经 payload 的顶层 `system` / `messages[0]`(role `system`/`developer`)改写。
 - **默认 bootstrap 工具对 `["bash", "edit"]`**:上游 dsh-anchored-standard 实测的 Minimal 工具 schema 是持久 `bash` + `str_replace_editor`(issue #11:该 schema 在适配器默认 maxTokens 下 5/5 锚定 `We need`,`bash`/`read` 等 standard 族 schema 11/11 失败)。omp/pi 工具目录没有 `str_replace_editor`,故默认使用宿主等价对 `bash` + `edit`(单文件精确替换编辑器,即 shell + 编辑器);若目录里存在 `str_replace_editor`(例如 DSH 方言),可显式配置 `["bash", "str_replace_editor"]`。`bash`/`pwsh` 条目会按目录里实际存在的平台 shell 归一化(`pwsh` 优先,对齐上游 router-bootstrap)。
 - **`bootstrapMaxTokens`(默认不封顶,仅 pi)**:可选的首请求输出预算封顶。上游 issue #11 实测:Minimal 工具 schema 在适配器默认 maxTokens(256000)下**无需封顶**即可锚定 `We need` 轨迹(5/5),而封顶的送达依赖 profile package 的 `prepareCall` 行为(rc.5 源码可达请求,rc.6 预构建包会被 `adapterDefaults.maxTokens` 覆盖)。故默认不封顶(opt-in);配置后才封顶,提升后剥离注入的上限。omp 无原生 max-token 控制且 `before_provider_request` 返回值被 openai-completions 传输层丢弃,故此配置在 omp 侧仅做校验、不生效。
 - **`taskRouting`(默认 `false`,仅 `two-tool` 模式)**:参考 [dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite) / dsh-router-standard 的实测路由。首轮前从会话第一条用户消息分类任务:`react`(新建/开发)→ doer persona + 写优先工具(`read`/`write`/`edit`);`spec`(修复/维护)→ DSH minimal persona + 读优先工具(`read`/`edit`/`glob`/`grep`);`weak`(模糊/无关键词)→ 模型自分类 persona(w6c/w7)+ 写优先工具。**Flash 模型一律强制 `weak`**(w7 + 静态深度思考/决策闭环锚,参考 [v4-flash-godmode-opencode-go](https://github.com/SheberDavid/v4-flash-godmode-opencode-go):omp/pi 无 DSH 式 per-message inbox,近场引导必须静态并入 persona)。路由工具缺失时回退到 `bootstrapTools`,再缺失才 fail-safe。默认 `false` 走纯 anchored-standard(固定 DSH minimal persona + `bootstrapTools`),实测稳定复现 `We need` 风格;设 `true` 启用任务感知路由。
-- **首请求上下文剥离**(仅 `minimalSystemPrompt` 开启):首请求消息被重建为 `[system(DSH minimal), 最后一条 user]`,自动注入的 AGENTS.md / skill-catalog / workspace 摘要一律不进首请求——上游 `suppressedContextSources`(issue #11)的 omp/pi 等价实现(omp/pi 消息无 `source.kind`,故按「只保留 system + user」重建,而非按来源过滤)。含 assistant/toolResult 的多轮历史不重建。
+- **`suppressedContextSources`(默认 `["skill-catalog", "agent-instructions"]`)**:首请求剥离自动注入的 AGENTS.md / skill-catalog / workspace 摘要——上游 issue #11 的 omp/pi 移植。消息携带 `source.kind` 时按来源精确过滤;omp/pi 消息无 `source.kind`,故按「只保留 system + last user」重建。显式配置 `[]` 关闭剥离而保留工具锚定。含 assistant/toolResult 的多轮历史不重建。
 
-上游新增的实验对比模式:首请求**零工具** + 一条固定 anchor 用户消息(默认 `This round is a test. Tools are not open yet; all tools will open next round.`,可配置),让第一条推理链走零注入轨迹;anchor 回复落库后恢复完整目录。本插件的移植:
+上游新增的实验对比模式:首请求**零工具** + 一条固定 anchor 用户消息(默认 `This round is a test. Tools are not open yet; all tools will open next round.`,可配置;上游 whoami-standard 的 `你是谁` 也可通过 `anchorText` 配置),让第一条推理链走零注入轨迹;anchor 回复落库后恢复完整目录。本插件的移植:
 
 - 首请求活动工具集置空(`omp` 经 `setActiveTools([])`;pi 经 payload `tools: []`),并把最后一个 user 消息的内容替换为 anchor 文本(真实消息仍持久化在会话里,下一轮继续时用完整目录回答)。
 - 提升信号固定为 `assistant-message`(anchor 回复),忽略 `promoteOn`。
-- 子代理(task)会话豁免:omp 会话条目含 `session_init` → 始终完整目录。
-- **与上游的差异**:上游把真实消息自动推迟到下一轮(带工具的轮次);本插件无法安全推迟持久化消息,故 anchor 轮结束后需要用户继续一句(anchor 回复本身会提示),真实消息在后续轮次用完整目录回答。pi 侧无 `session_init` 条目,子代理豁免是 omp 专属(pi 子代理与其他会话同等对待)。
+- 子代理(task)会话豁免:omp 会话条目含 `session_init` → 所有模式始终完整目录(pi 无 `session_init`,同等对待)。
+- **compaction 后**:zero 模式不再注入 anchor;若配置了 `compactionTools`,首轮暴露平台 shell + 该工作集,否则继续保持零工具,直到新的 assistant 消息重新提升。
+- **与上游的差异**:上游把真实消息自动推迟到下一轮(带工具的轮次);本插件无法安全推迟持久化消息,故 anchor 轮结束后需要用户继续一句(anchor 回复本身会提示),真实消息在后续轮次用完整目录回答。
 
 ## 目录结构
 
 ```text
 src/
-  core.ts   # 共享纯逻辑:toolName / deepMerge / matchGlob / modelMatches / hasToolCallHistory / hasAssistantMessage / isSubagentSession / isPromoted / isTargetModel / promoteTrigger / validateRawConfig / filterTools / zeroAnchorPayload / stripContextMessages / rewriteSystemPrompt / capMaxTokens / countTrajectory / extractRaw / applyDefaults
+  core.ts   # 共享纯逻辑:toolName / deepMerge / matchGlob / modelMatches / promotionPhase / routeTaskMode / selectBootstrapTools / selectZeroBootstrapTools / filterTools / zeroAnchorPayload / stripContextMessages / rewriteSystemPrompt / capMaxTokens / countTrajectory / extractRaw / applyDefaults / validateRawConfig
   omp.ts    # omp 入口:setActiveTools 收窄/恢复 + context 注入 anchor + before_agent_start 替换 systemPrompt + config.yml(YAML)
   pi.ts     # pi 入口:before_provider_request + buildContextEntries() + settings.json
 test/
-  core.test.ts   # node:test 单测(116 例)
+  core.test.ts   # node:test 单测(130 例)
 ```
 
 ## 安装
@@ -92,8 +93,10 @@ anchoredTools:
         - edit # 默认 shell+编辑器对(等价 DSH Minimal 的 bash+str_replace_editor)
     promoteOn: either # "tool-call" | "assistant-message" | "either"
     minimalSystemPrompt: true # 系统提示 → DSH/route persona(永久)
-    taskRouting: false # 默认,纯 anchored-standard(稳定 `We need`);true = 任务感知路由
-    bootstrapMaxTokens: 1024 # 可选:首请求输出预算封顶(默认不封顶;仅 pi 生效)
+    suppressedContextSources:
+        - skill-catalog
+        - agent-instructions # 显式 [] 关闭首请求上下文剥离
+    compactionTools: [] # compaction 后、重新提升前的工作集(默认无)
     notify: true # 提升时一次性 TUI 通知
 ```
 
@@ -125,8 +128,9 @@ pi install omp-pi-anchored-standard
 		"promoteOn": "either",
 		"minimalSystemPrompt": true,
 		"taskRouting": false,
-		"bootstrapMaxTokens": 1024,
 		"anchorText": "This round is a test. Tools are not open yet; all tools will open next round.",
+		"suppressedContextSources": ["skill-catalog", "agent-instructions"],
+		"compactionTools": [],
 		"notify": true,
 	},
 }
@@ -162,10 +166,10 @@ npm test            # node --test(原生 TS,无需 bun;bun 环境同样可跑 no
 - **omp** 用 `setActiveTools` 收窄活动工具集,对**所有**传输层生效(含 in-band 方言:方言目录由活动工具生成,空/收窄集合会同步反映到 system prompt 目录块);**pi** 用 `before_provider_request` payload 过滤(pi 端口验证有效,本机未装 pi 无法复测)。
 - omp 的 `before_provider_request` payload 替换对 openai-completions 传输(deepseek 等)无效(上游丢弃返回值),故 omp 入口不依赖它。
 - `bootstrapMode: "zero"` 的 anchor 轮结束需用户继续一句(真实消息不自动推迟),见上文差异说明。
-- pi 侧无 `session_init` 条目,zero 模式的子代理豁免仅 omp 生效。
+- pi 侧无 `session_init` 条目,子代理豁免仅 omp 生效(所有模式);pi 子代理与其他会话同等对待。
 - `bootstrapMaxTokens` 默认不封顶(opt-in),且仅 pi 生效:omp 无原生 max-token setter,其 `before_provider_request` 返回值被 openai-completions 传输层丢弃(见上),故 omp 只校验该配置、不施加输出预算封顶。
 - `models` 默认 `["deepseek-v4-pro"]`;显式配置 `[]` 可关闭锚定,不再要求用户必须配置目标模型。
-- 上游 `suppressedContextSources`(issue #11:首请求剥离自动注入的 AGENTS.md / skill-catalog 上下文)已通过**消息重建**移植:omp/pi 消息无 `source.kind`,故首请求直接重建为 `[system, user]`,自动注入上下文一律丢弃;多轮历史跳过。
+- 上游 `suppressedContextSources` 已移植:消息带 `source.kind` 时按来源过滤;omp/pi 消息无 `source.kind`,故首请求重建为 `[system, user]`;`[]` 关闭剥离。
 
 ## 参考实现
 
@@ -181,7 +185,8 @@ npm test            # node --test(原生 TS,无需 bun;bun 环境同样可跑 no
 - `bootstrapTools` 默认 `["bash", "edit"]`:dsh-anchored-standard 实测 Minimal schema 是 `bash` + `str_replace_editor`;omp/pi 无 `str_replace_editor`,用宿主单文件精确替换编辑器 `edit` 等价替代。
 - `taskRouting` 下 Flash 一律 `weak` 并静态并入 w7 深度思考/决策闭环锚(v4-flash-godmode 对 opencode-go 的适配;omp/pi 同样无 DSH 式 per-message inbox,动态近场引导不可用)。
 - 平台 shell 选择 `pwsh` 优先(dsh-router-standard router-bootstrap)。
-- zero 模式与首请求上下文剥离对应 dsh-anchored-standard 的 zero-anchored-standard 与 `suppressedContextSources`(issue #11);myDshPresets 的 warmup 轮思路与 zero 模式同源。
+- `compactionTools` / compaction epoch 移植自 dsh-anchored-standard `compaction-epoch.mjs`(compaction 后作为「第二个首请求」重新锚定)。
+- zero 模式与首请求上下文剥离对应 dsh-anchored-standard 的 zero-anchored-standard / whoami-standard(`anchorText` 可配 `你是谁`)与 `suppressedContextSources`(issue #11);myDshPresets 的 warmup 轮思路与 zero 模式同源(warmupbetter 对应官方 API,warmupbetter-replay 对应 opencode-go)。
 
 ## License
 
