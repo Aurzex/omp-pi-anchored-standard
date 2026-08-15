@@ -34,6 +34,7 @@ import {
 	routerBootstrapTools,
 	routeTaskMode,
 	selectBootstrapTools,
+	selectPromotedTools,
 	selectZeroBootstrapTools,
 	SessionPromotionMemo,
 	shouldRestoreFullCatalog,
@@ -462,7 +463,7 @@ describe("shared config helpers", () => {
 	});
 
 	test("promoteTrigger maps zero mode to the assistant-message trigger", () => {
-		assert.equal(promoteTrigger(cfg), "tool-call");
+		assert.equal(promoteTrigger(cfg), "either");
 		assert.equal(
 			promoteTrigger({ ...cfg, bootstrapMode: "zero" }),
 			"assistant-message",
@@ -657,13 +658,15 @@ describe("applyDefaults", () => {
 		bootstrapTools: ["bash", "read"],
 		notify: true,
 		bootstrapMode: "two-tool",
-		promoteOn: "tool-call",
+		promoteOn: "either",
 		anchorText: ANCHOR_TEXT,
 		minimalSystemPrompt: true,
 		bootstrapMaxTokens: undefined,
 		taskRouting: false,
 		suppressedContextSources: ["skill-catalog", "agent-instructions"],
 		compactionTools: [],
+		includeSubagents: false,
+		promotedTools: [],
 	};
 
 	test("empty raw config resolves to DEFAULTS", () => {
@@ -711,6 +714,8 @@ describe("applyDefaults", () => {
 			taskRouting: false,
 			suppressedContextSources: ["skill-catalog", "agent-instructions"],
 			compactionTools: [],
+			includeSubagents: false,
+			promotedTools: [],
 		});
 	});
 	test("invalid bootstrapMode and promoteOn normalize to defaults", () => {
@@ -719,7 +724,7 @@ describe("applyDefaults", () => {
 			promoteOn: "tool_call",
 		});
 		assert.equal(cfg.bootstrapMode, "two-tool");
-		assert.equal(cfg.promoteOn, "tool-call");
+		assert.equal(cfg.promoteOn, "either");
 	});
 	test("invalid bootstrapMaxTokens leaves the cap off", () => {
 		assert.equal(
@@ -767,6 +772,24 @@ describe("applyDefaults", () => {
 			applyDefaults({ compactionTools: ["read", "read", "edit"] })
 				.compactionTools,
 			["read", "edit"],
+		);
+	});
+
+	test("includeSubagents defaults false and accepts true", () => {
+		assert.equal(applyDefaults({}).includeSubagents, false);
+		assert.equal(
+			applyDefaults({ includeSubagents: true }).includeSubagents,
+			true,
+		);
+	});
+
+	test("promotedTools defaults empty and deduplicates", () => {
+		assert.deepStrictEqual(applyDefaults({}).promotedTools, []);
+		assert.deepStrictEqual(
+			applyDefaults({
+				promotedTools: ["bash", "read", "read", "edit"],
+			}).promotedTools,
+			["bash", "read", "edit"],
 		);
 	});
 });
@@ -958,6 +981,25 @@ describe("task routing helpers", () => {
 		);
 		assert.deepStrictEqual(
 			selectZeroBootstrapTools(["bash", "edit"], ["glob"], 1),
+			{ tools: [], missing: ["glob"] },
+		);
+	});
+
+	test("selectPromotedTools: empty keeps full catalog, non-empty resolves resident set", () => {
+		assert.deepStrictEqual(
+			selectPromotedTools(["bash", "read", "edit"], []),
+			{ tools: [], missing: [] },
+		);
+		assert.deepStrictEqual(
+			selectPromotedTools(["bash", "read", "edit"], ["bash", "read"]),
+			{ tools: ["bash", "read"], missing: [] },
+		);
+		assert.deepStrictEqual(
+			selectPromotedTools(["pwsh", "read", "edit"], ["bash", "read"]),
+			{ tools: ["pwsh", "read"], missing: [] },
+		);
+		assert.deepStrictEqual(
+			selectPromotedTools(["bash", "read"], ["bash", "glob"]),
 			{ tools: [], missing: ["glob"] },
 		);
 	});

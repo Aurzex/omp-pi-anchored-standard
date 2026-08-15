@@ -5,14 +5,14 @@
  *
  * Port of the dsh-anchored-standard bootstrap concept
  * (https://github.com/xiaobright/dsh-anchored-standard): keep the first model
- * request on a small tool surface, promote to the full catalog after the
- * session's first durable promotion signal. The pi port is
- * (https://github.com/dbydd/pi-anchored-tool-for-dspro); the pure helpers
- * below mirror that implementation's semantics exactly, extended with the
- * upstream "zero-tool anchor" mode (zero-anchored-standard), the `promoteOn`
- * trigger selector, the permanent minimal persona (DSH `minimal` preset), and
- * the first-request output-budget cap (`bootstrapMaxTokens`, upstream issue
- * #6).
+ * request on a small tool surface, promote to the full catalog (or an optional
+ * resident set) after the session's first durable promotion signal. The pi
+ * port is (https://github.com/dbydd/pi-anchored-tool-for-dspro); the pure
+ * helpers below mirror that implementation's semantics exactly, extended with
+ * the upstream "zero-tool anchor" mode (zero-anchored-standard), the
+ * `promoteOn` trigger selector, the permanent minimal persona (DSH `minimal`
+ * preset), and the first-request output-budget cap (`bootstrapMaxTokens`,
+ * upstream issue #6).
  */
 
 export interface ToolLike {
@@ -818,6 +818,25 @@ export function selectZeroBootstrapTools(
 	};
 }
 
+/**
+ * Post-promotion resident tool surface, ported from upstream
+ * dsh-anchored-standard's "resident set" change. Empty `promotedTools`
+ * preserves the original behavior: restore the full catalog. Non-empty keeps
+ * only the listed tools after promotion (plus the platform shell when a
+ * `bash`/`pwsh` entry is configured), so heavier tools stay one explicit
+ * config change away instead of flooding the post-promotion trajectory.
+ * Fails safe: missing tools report `missing` so callers can warn and keep the
+ * full catalog.
+ */
+export function selectPromotedTools(
+	available: string[],
+	promotedTools: string[],
+): { tools: string[]; missing: string[] } {
+	if (promotedTools.length === 0) return { tools: [], missing: [] };
+	const desired = normalizeShellTools(promotedTools, available);
+	return resolveBootstrap(available, desired);
+}
+
 export interface SystemPromptRewrite {
 	/** True when the payload was modified. */
 	changed: boolean;
@@ -933,6 +952,8 @@ export interface Config {
 	taskRouting: boolean;
 	suppressedContextSources: string[];
 	compactionTools: string[];
+	includeSubagents: boolean;
+	promotedTools: string[];
 }
 
 /**
@@ -987,6 +1008,8 @@ export const ALLOWED_RAW_KEYS = [
 	"taskRouting",
 	"suppressedContextSources",
 	"compactionTools",
+	"includeSubagents",
+	"promotedTools",
 ] as const;
 
 function isNonEmptyStringArray(value: unknown): value is string[] {
@@ -1023,7 +1046,7 @@ export function validateRawConfig(
 	}
 	if (raw.promoteOn !== undefined && !isPromoteOn(raw.promoteOn)) {
 		warn(
-			`[${extName}] invalid promoteOn ${JSON.stringify(raw.promoteOn)}; using "tool-call"`,
+			`[${extName}] invalid promoteOn ${JSON.stringify(raw.promoteOn)}; using "either"`,
 		);
 	}
 	if (
@@ -1057,6 +1080,14 @@ export function validateRawConfig(
 			`[${extName}] invalid compactionTools ${JSON.stringify(raw.compactionTools)}; using no compaction work set (default)`,
 		);
 	}
+	if (
+		raw.promotedTools !== undefined &&
+		!isNonEmptyStringArray(raw.promotedTools)
+	) {
+		warn(
+			`[${extName}] invalid promotedTools ${JSON.stringify(raw.promotedTools)}; using full catalog after promotion (default)`,
+		);
+	}
 }
 
 /** Raw `anchoredTools` block as read from the host settings file. */
@@ -1073,6 +1104,8 @@ export interface RawConfig {
 	taskRouting?: boolean;
 	suppressedContextSources?: string[];
 	compactionTools?: string[];
+	includeSubagents?: boolean;
+	promotedTools?: string[];
 }
 
 /** Fixed anchor text from upstream zero-anchored-standard (config-overridable). */
@@ -1087,16 +1120,23 @@ export const DEFAULTS: Config = {
 	bootstrapTools: ["bash", "read"],
 	notify: true,
 	bootstrapMode: "two-tool",
-	// The frozen anchored-standard preset promotes on the first durable
-	// tool/call. `either` remains available for sessions where a text-only
-	// first reply must also unlock the full catalog.
-	promoteOn: "tool-call",
+	// Upstream dsh-anchored-standard now defaults to `either`: request #1 sees
+	// the bootstrap catalog and request #2 always sees the full/resident
+	// catalog, so a text-only first reply cannot trap the session in
+	// bootstrap. `tool-call` is still available for the original behavior.
+	promoteOn: "either",
 	anchorText: ANCHOR_TEXT,
 	minimalSystemPrompt: true,
 	bootstrapMaxTokens: undefined,
 	taskRouting: false,
 	suppressedContextSources: [...DEFAULT_SUPPRESSED_SOURCES],
 	compactionTools: [],
+	includeSubagents: false,
+	// Empty = restore the full catalog after promotion (the original plugin
+	// promise). Non-empty = upstream's post-promotion resident-set behavior:
+	// keep only these tools (plus the platform shell when `bash`/`pwsh` is
+	// listed) after promotion.
+	promotedTools: [],
 };
 
 /**
@@ -1157,6 +1197,10 @@ export function applyDefaults(raw: RawConfig): Config {
 			: [...DEFAULTS.suppressedContextSources],
 		compactionTools: isNonEmptyStringArray(raw.compactionTools)
 			? [...new Set(raw.compactionTools)]
+			: [],
+		includeSubagents: raw.includeSubagents ?? DEFAULTS.includeSubagents,
+		promotedTools: isNonEmptyStringArray(raw.promotedTools)
+			? [...new Set(raw.promotedTools)]
 			: [],
 	};
 }

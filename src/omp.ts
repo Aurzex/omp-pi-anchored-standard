@@ -24,8 +24,9 @@
  *   - persona: `before_agent_start` returns `{ systemPrompt: [...] }` to swap
  *     the whole system prompt for the permanent DSH minimal persona
  *     (`minimalSystemPrompt`, default on);
- *   - restore: tool_call / message_end → `setActiveTools(full)` once the
- *     session is promoted, before the next request serializes;
+ *   - restore: tool_call / message_end → `setActiveTools(full)` (or the
+ *     configured `promotedTools` resident set) once the session is promoted,
+ *     before the next request serializes;
  *   - the phase is derived from durable session entries via
  *     `ctx.sessionManager.getBranch()`, so /resume and /reload preserve it.
  *
@@ -49,8 +50,10 @@
  *       - bash
  *       - read                    # two-tool mode only (default)
  *     bootstrapMode: two-tool     # "two-tool" | "zero"
- *     promoteOn: tool-call        # "tool-call" | "assistant-message" | "either"
+ *     promoteOn: either           # "tool-call" | "assistant-message" | "either"
  *     notify: true                # one-time TUI notice on promotion
+ *     includeSubagents: false     # anchor subagent sessions too when true
+ *     promotedTools: []           # post-promotion resident set; [] = full catalog
  *
  * Requirements: omp runs on Bun, so `Bun.YAML.parse` is available for reading
  * YAML settings. No other runtime dependencies.
@@ -81,6 +84,7 @@ import {
 	promoteTrigger,
 	routerPersonaFor,
 	selectBootstrapTools,
+	selectPromotedTools,
 	selectZeroBootstrapTools,
 	SessionPromotionMemo,
 	shouldRestoreFullCatalog,
@@ -174,7 +178,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		notified.add(sid);
 		ctx.ui.notify(
-			`[${EXT_NAME}] ${modelId}: session promoted — full tool catalog restored.`,
+			`[${EXT_NAME}] ${modelId}: session promoted — ${cfg.promotedTools.length > 0 ? "resident tool catalog applied." : "full tool catalog restored."}`,
 			"info",
 		);
 	};
@@ -210,10 +214,11 @@ export default function (pi: ExtensionAPI) {
 			() => branch,
 		);
 		if (phase.promoted) return; // already promoted (resume/reload)
-		// Upstream: subagents always see the full catalog from their very
+		// Upstream: by default subagents see the full catalog from their very
 		// first request (delegationDepth > 0). omp marks them with a
-		// `session_init` entry.
-		if (isSubagentSession(branch)) return;
+		// `session_init` entry. Set `includeSubagents: true` to anchor them
+		// too.
+		if (!cfg.includeSubagents && isSubagentSession(branch)) return;
 
 		const full = pi.getActiveTools();
 		let target: string[];
@@ -279,6 +284,8 @@ export default function (pi: ExtensionAPI) {
 	 * Restore the full active tool set once the session is promoted, before
 	 * the next request serializes, or immediately when the session stopped
 	 * being a target (config disabled, empty target list, model switched).
+	 * When `promotedTools` is configured, promotion switches to that resident
+	 * set instead of the full catalog (upstream post-promotion behavior).
 	 * Idempotent per session.
 	 */
 	const ensureRestored = async (ctx: ExtensionContext, cfg: Config) => {
@@ -298,8 +305,24 @@ export default function (pi: ExtensionAPI) {
 			if (!promoted) return; // not yet promoted
 		}
 
+		let target = full;
+		if (!shouldLift && cfg.promotedTools.length > 0) {
+			const selected = selectPromotedTools(full, cfg.promotedTools);
+			if (selected.missing.length > 0) {
+				// Configuration error — fail safe, never strip tools silently.
+				logger.warn(
+					`[${EXT_NAME}] promoted tools missing from catalog: ${selected.missing.join(", ")}; keeping full catalog`,
+				);
+			} else {
+				target = selected.tools;
+				logger.info(
+					`[${EXT_NAME}] ${ctx.model!.id}: session promoted — resident tool catalog (${target.join(", ")})`,
+				);
+			}
+		}
+
 		restored.add(sid);
-		await pi.setActiveTools(full);
+		await pi.setActiveTools(target);
 		if (!shouldLift) maybeNotifyPromoted(sid, ctx.model!.id, cfg, ctx);
 	};
 
@@ -440,7 +463,9 @@ export default function (pi: ExtensionAPI) {
 				: !matched
 					? "not-targeted"
 					: promotion.promoted
-						? "promoted (full catalog)"
+						? cfg.promotedTools.length > 0
+							? "promoted (resident catalog)"
+							: "promoted (full catalog)"
 						: cfg.bootstrapMode === "zero"
 							? promotion.boundary >= 0
 								? "bootstrap (post-compaction zero-tool)"
@@ -456,6 +481,7 @@ export default function (pi: ExtensionAPI) {
 				`task routing: ${cfg.taskRouting ? `on (task=${taskMode})` : "off"}`,
 				`bootstrap tools: ${selected ? `${selected.tools.join(", ")} (${selected.used})` : cfg.bootstrapTools.join(", ")}`,
 				`compaction tools: ${cfg.compactionTools.join(", ") || "(none)"}`,
+				`promoted tools: ${cfg.promotedTools.join(", ") || "(full catalog)"}`,
 				`bootstrap max tokens: ${cfg.bootstrapMaxTokens ?? "off (default)"}${cfg.bootstrapMode === "two-tool" ? " (pi only)" : ""}`,
 				`trajectory: ${traj ? `we ${traj.we}, let's ${traj.lets}, let me ${traj.letMe}` : "n/a"}`,
 				`minimal system prompt: ${cfg.minimalSystemPrompt ? "on (DSH/route persona)" : "off (host default)"}`,
