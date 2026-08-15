@@ -16,10 +16,13 @@ import {
 	isSubagentSession,
 	lastUserIndex,
 	matchGlob,
+	memoizedIsPromoted,
 	MINIMAL_SYSTEM_PROMPT,
 	modelMatches,
 	resolveBootstrap,
 	rewriteSystemPrompt,
+	SessionPromotionMemo,
+	shouldRestoreFullCatalog,
 	toolName,
 	zeroAnchorPayload,
 } from "../src/core.ts";
@@ -256,6 +259,126 @@ describe("isPromoted", () => {
 				[{ type: "message", message: { role: "user" } }],
 				"either",
 			),
+			false,
+		);
+	});
+});
+
+describe("SessionPromotionMemo / memoizedIsPromoted", () => {
+	test("memo hit returns true without rescanning entries", () => {
+		const memo = new SessionPromotionMemo();
+		let scans = 0;
+		const promotedEntries = () => {
+			scans++;
+			return [
+				{
+					type: "message",
+					message: { role: "assistant", content: [{ type: "text" }] },
+				},
+			];
+		};
+		assert.equal(
+			memoizedIsPromoted(memo, "s", "either", promotedEntries),
+			true,
+		);
+		assert.equal(scans, 1);
+		assert.equal(
+			memoizedIsPromoted(memo, "s", "either", () => {
+				scans++;
+				return [];
+			}),
+			true,
+		);
+		assert.equal(scans, 1); // second call skipped the scan
+	});
+
+	test("unpromoted scan records promotion once it flips", () => {
+		const memo = new SessionPromotionMemo();
+		assert.equal(
+			memoizedIsPromoted(memo, "s", "tool-call", () => []),
+			false,
+		);
+		assert.equal(memo.has("s"), false);
+		assert.equal(
+			memoizedIsPromoted(memo, "s", "tool-call", () => [
+				{ type: "message", message: { role: "toolResult" } },
+			]),
+			true,
+		);
+		assert.equal(memo.has("s"), true);
+	});
+
+	test("clear forgets promoted sessions", () => {
+		const memo = new SessionPromotionMemo();
+		memo.add("s");
+		memo.clear();
+		assert.equal(memo.has("s"), false);
+	});
+
+	test("missing sid disables the memo", () => {
+		const memo = new SessionPromotionMemo();
+		let scans = 0;
+		const promotedEntries = () => {
+			scans++;
+			return [
+				{
+					type: "message",
+					message: { role: "assistant", content: [{ type: "text" }] },
+				},
+			];
+		};
+		assert.equal(
+			memoizedIsPromoted(memo, undefined, "either", promotedEntries),
+			true,
+		);
+		assert.equal(
+			memoizedIsPromoted(memo, undefined, "either", promotedEntries),
+			true,
+		);
+		assert.equal(scans, 2);
+	});
+});
+
+describe("shouldRestoreFullCatalog", () => {
+	const cfg = applyDefaults({ models: ["deepseek-v4-pro"] });
+
+	test("disabled config restores", () => {
+		assert.equal(
+			shouldRestoreFullCatalog(
+				{ ...cfg, enabled: false },
+				{ id: "deepseek-v4-pro", provider: "deepseek" },
+			),
+			true,
+		);
+	});
+
+	test("empty target list restores", () => {
+		assert.equal(
+			shouldRestoreFullCatalog(
+				{ ...cfg, models: [] },
+				{ id: "deepseek-v4-pro", provider: "deepseek" },
+			),
+			true,
+		);
+	});
+
+	test("unknown model keeps the narrowed catalog", () => {
+		assert.equal(shouldRestoreFullCatalog(cfg, undefined), false);
+	});
+
+	test("known non-target model restores", () => {
+		assert.equal(
+			shouldRestoreFullCatalog(cfg, { id: "gpt-5", provider: "openai" }),
+			true,
+		);
+	});
+
+	test("known target model does not force a restore", () => {
+		assert.equal(
+			shouldRestoreFullCatalog(cfg, {
+				id: "deepseek-v4-pro",
+				provider: "deepseek",
+			}),
 			false,
 		);
 	});

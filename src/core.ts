@@ -157,6 +157,47 @@ export function isPromoted(
 	return hasToolCallHistory(entries) || hasAssistantMessage(entries);
 }
 
+/**
+ * Promotion decisions are append-only per session. A session once found
+ * promoted stays promoted for the rest of the process, so later checks can
+ * skip the durable-event scan entirely (mirrors upstream
+ * dsh-anchored-standard's memoized `promoted` Set).
+ */
+export class SessionPromotionMemo {
+	#sessions = new Set<string>();
+
+	/** True when this session has already been recorded as promoted. */
+	has(sid: string): boolean {
+		return this.#sessions.has(sid);
+	}
+
+	/** Record a session as promoted (append-only). */
+	add(sid: string): void {
+		this.#sessions.add(sid);
+	}
+
+	clear(): void {
+		this.#sessions.clear();
+	}
+}
+
+/**
+ * Memoized promotion check. `getEntries` is called only when the session has
+ * not already been recorded as promoted; on a memo hit the scan is skipped
+ * and true is returned. A missing session id disables the memo.
+ */
+export function memoizedIsPromoted(
+	memo: SessionPromotionMemo,
+	sid: string | undefined,
+	promoteOn: PromoteOn,
+	getEntries: () => EntryLike[],
+): boolean {
+	if (sid && memo.has(sid)) return true;
+	const promoted = isPromoted(getEntries(), promoteOn);
+	if (promoted && sid) memo.add(sid);
+	return promoted;
+}
+
 export interface FilterResult {
 	/** True when the payload was modified. */
 	changed: boolean;
@@ -400,6 +441,22 @@ export interface Config {
 	anchorText: string;
 	minimalSystemPrompt: boolean;
 	bootstrapMaxTokens: number;
+}
+
+/**
+ * True when a currently narrowed omp session must be restored to the full
+ * catalog even without a promotion signal: anchoring was disabled, the target
+ * list is empty, or a known model is no longer targeted. Returns false for an
+ * unknown model — `session_start` can fire before the model is known, and the
+ * next hook with a model makes the decision.
+ */
+export function shouldRestoreFullCatalog(
+	cfg: Config,
+	model: { id: string; provider: string } | undefined,
+): boolean {
+	if (!cfg.enabled || cfg.models.length === 0) return true;
+	if (model === undefined) return false;
+	return !modelMatches(model.id, model.provider, cfg.models);
 }
 
 /** Raw `anchoredTools` block as read from the host settings file. */

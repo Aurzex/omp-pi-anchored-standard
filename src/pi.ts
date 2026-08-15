@@ -61,12 +61,15 @@ import {
 	isPromoteOn,
 	isPromoted,
 	isSubagentSession,
+	memoizedIsPromoted,
 	MINIMAL_SYSTEM_PROMPT,
 	modelMatches,
 	rewriteSystemPrompt,
+	SessionPromotionMemo,
 	toolName,
 	zeroAnchorPayload,
 	type Config,
+	type EntryLike,
 	type RawConfig,
 	type ToolLike,
 } from "./core";
@@ -131,6 +134,8 @@ export default function (pi: ExtensionAPI) {
 	const notified = new Set<string>();
 	// Sessions that already logged the one-time system-prompt rewrite notice.
 	const spLogged = new Set<string>();
+	// Sessions already known promoted (append-only memo; avoids rescanning).
+	const promotionMemo = new SessionPromotionMemo();
 
 	const isTarget = (
 		model: { id: string; provider: string } | undefined,
@@ -173,11 +178,20 @@ export default function (pi: ExtensionAPI) {
 		if (!cfg.enabled || cfg.models.length === 0) return;
 		if (!isTarget(ctx.model, cfg)) return;
 
-		const entries = ctx.sessionManager.buildContextEntries();
 		const sid = ctx.sessionManager.getSessionId();
 		const promoteTrigger =
 			cfg.bootstrapMode === "zero" ? "assistant-message" : cfg.promoteOn;
-		const promoted = isPromoted(entries, promoteTrigger);
+		let entries: EntryLike[] | undefined;
+		const promoted = memoizedIsPromoted(
+			promotionMemo,
+			sid,
+			promoteTrigger,
+			() => {
+				const branch = ctx.sessionManager.buildContextEntries();
+				entries = branch;
+				return branch;
+			},
+		);
 
 		let payload = event.payload as Record<string, unknown> | undefined;
 		if (!payload || typeof payload !== "object") return;
@@ -200,14 +214,15 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (cfg.bootstrapMode === "zero") {
-			// Subagents keep their full catalog from their very first request.
-			if (isSubagentSession(entries))
-				return changed ? payload : undefined;
 			// The anchor reply promotes the session (assistant-message trigger).
 			if (promoted) {
 				if (sid) maybeNotifyPromoted(sid, ctx.model!.id, cfg, ctx);
 				return changed ? payload : undefined;
 			}
+			// Subagents keep their full catalog from their very first request
+			// (pi's context entries have no session_init; kept for parity with omp).
+			if (isSubagentSession(entries ?? []))
+				return changed ? payload : undefined;
 			const result = zeroAnchorPayload(payload, cfg.anchorText);
 			if (!result.payload) return changed ? payload : undefined;
 			if (sid) anchoredSessions.set(sid, true);
@@ -279,6 +294,7 @@ export default function (pi: ExtensionAPI) {
 		anchoredSessions.clear();
 		notified.clear();
 		spLogged.clear();
+		promotionMemo.clear();
 	});
 
 	pi.registerCommand("anchored-tools", {
@@ -302,7 +318,7 @@ export default function (pi: ExtensionAPI) {
 						? "promoted (full catalog)"
 						: cfg.bootstrapMode === "zero"
 							? "bootstrap (zero-tool anchor)"
-							: "bootstrap (shell + read only)";
+							: `bootstrap (${cfg.bootstrapTools.join(", ")} only)`;
 			const lines = [
 				`enabled: ${cfg.enabled}`,
 				`mode: ${cfg.bootstrapMode}`,

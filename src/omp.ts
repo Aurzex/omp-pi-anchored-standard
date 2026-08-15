@@ -74,10 +74,14 @@ import {
 	isPromoteOn,
 	isPromoted,
 	isSubagentSession,
+	memoizedIsPromoted,
 	MINIMAL_SYSTEM_PROMPT,
 	modelMatches,
 	resolveBootstrap,
+	SessionPromotionMemo,
+	shouldRestoreFullCatalog,
 	type Config,
+	type EntryLike,
 	type PayloadMessage,
 	type RawConfig,
 } from "./core";
@@ -154,6 +158,8 @@ export default function (pi: ExtensionAPI) {
 	const restored = new Set<string>();
 	// Captured full active tool set per narrowed session.
 	const fullTools = new Map<string, string[]>();
+	// Sessions already known promoted (append-only memo; avoids rescanning).
+	const promotionMemo = new SessionPromotionMemo();
 	// Sessions that already showed the one-time promotion notice.
 	const notified = new Set<string>();
 	const logger = pi.logger;
@@ -200,13 +206,33 @@ export default function (pi: ExtensionAPI) {
 	 * configured bootstrap tool is missing from the catalog.
 	 */
 	const ensureNarrowed = async (ctx: ExtensionContext, cfg: Config) => {
-		if (!cfg.enabled || cfg.models.length === 0) return;
-		if (!isTarget(ctx.model, cfg)) return;
+		if (!cfg.enabled || cfg.models.length === 0) {
+			await ensureRestored(ctx, cfg);
+			return;
+		}
+		if (!isTarget(ctx.model, cfg)) {
+			// Known non-target model after a switch: lift a previous narrowing.
+			// Unknown model at session_start is left alone; before_agent_start
+			// re-runs once the model is known.
+			if (ctx.model) await ensureRestored(ctx, cfg);
+			return;
+		}
 		const sid = ctx.sessionManager.getSessionId();
 		if (!sid || narrowed.has(sid)) return;
-		const entries = ctx.sessionManager.getBranch();
-		if (isPromoted(entries, trigger(cfg))) return; // already promoted
-		if (cfg.bootstrapMode === "zero" && isSubagentSession(entries)) return; // subagents full catalog
+		let entries: EntryLike[] | undefined;
+		const promoted = memoizedIsPromoted(
+			promotionMemo,
+			sid,
+			trigger(cfg),
+			() => {
+				const branch = ctx.sessionManager.getBranch();
+				entries = branch;
+				return branch;
+			},
+		);
+		if (promoted) return; // already promoted (resume/reload)
+		if (cfg.bootstrapMode === "zero" && isSubagentSession(entries ?? []))
+			return; // subagents full catalog
 
 		const full = pi.getActiveTools();
 		let target: string[];
@@ -237,20 +263,30 @@ export default function (pi: ExtensionAPI) {
 
 	/**
 	 * Restore the full active tool set once the session is promoted, before
-	 * the next request serializes. Idempotent per session.
+	 * the next request serializes, or immediately when the session stopped
+	 * being a target (config disabled, empty target list, model switched).
+	 * Idempotent per session.
 	 */
 	const ensureRestored = async (ctx: ExtensionContext, cfg: Config) => {
-		if (!cfg.enabled || cfg.models.length === 0) return;
 		const sid = ctx.sessionManager.getSessionId();
 		if (!sid || !narrowed.has(sid) || restored.has(sid)) return;
-		if (!isTarget(ctx.model, cfg)) return;
-		const entries = ctx.sessionManager.getBranch();
-		if (!isPromoted(entries, trigger(cfg))) return; // not yet promoted
 		const full = fullTools.get(sid);
 		if (!full) return;
+
+		const shouldLift = shouldRestoreFullCatalog(cfg, ctx.model);
+		if (!shouldLift) {
+			const promoted = memoizedIsPromoted(
+				promotionMemo,
+				sid,
+				trigger(cfg),
+				() => ctx.sessionManager.getBranch(),
+			);
+			if (!promoted) return; // not yet promoted
+		}
+
 		restored.add(sid);
 		await pi.setActiveTools(full);
-		maybeNotifyPromoted(sid, ctx.model!.id, cfg, ctx);
+		if (!shouldLift) maybeNotifyPromoted(sid, ctx.model!.id, cfg, ctx);
 	};
 
 	// Narrow before the first request is serialized. session_start may run
@@ -292,8 +328,13 @@ export default function (pi: ExtensionAPI) {
 		const sid = ctx.sessionManager.getSessionId();
 		if (!sid || !narrowed.has(sid) || restored.has(sid)) return;
 		if (!isTarget(ctx.model, cfg)) return;
-		const entries = ctx.sessionManager.getBranch();
-		if (isPromoted(entries, "assistant-message")) return;
+		const promoted = memoizedIsPromoted(
+			promotionMemo,
+			sid,
+			"assistant-message",
+			() => ctx.sessionManager.getBranch(),
+		);
+		if (promoted) return;
 		const replaced = anchorPayloadMessages(
 			event.messages as unknown as PayloadMessage[],
 			cfg.anchorText,
@@ -306,6 +347,7 @@ export default function (pi: ExtensionAPI) {
 		restored.clear();
 		fullTools.clear();
 		notified.clear();
+		promotionMemo.clear();
 	});
 
 	pi.registerCommand("anchored-tools", {
@@ -325,7 +367,7 @@ export default function (pi: ExtensionAPI) {
 						? "promoted (full catalog)"
 						: cfg.bootstrapMode === "zero"
 							? "bootstrap (zero-tool anchor)"
-							: "bootstrap (shell + read only)";
+							: `bootstrap (${cfg.bootstrapTools.join(", ")} only)`;
 			const lines = [
 				`enabled: ${cfg.enabled}`,
 				`mode: ${cfg.bootstrapMode}`,
