@@ -187,6 +187,19 @@ export default function (pi: ExtensionAPI) {
 			ctx.model!.id,
 		);
 
+		// Apply the optional first-request output-budget cap (and strip it
+		// after promotion) before any mode-specific branch. This keeps
+		// `bootstrapMaxTokens` consistent for both two-tool and zero mode.
+		const capped = capMaxTokens(
+			payload,
+			cfg.bootstrapMaxTokens,
+			phase.promoted,
+		);
+		if (capped.changed) {
+			payload = capped.payload;
+			changed = true;
+		}
+
 		// The DSH persona replaces the host system prompt permanently (only
 		// the tool catalog promotes). Task routing picks the measured optimum
 		// persona for the classified task; otherwise the minimal persona is
@@ -268,24 +281,7 @@ export default function (pi: ExtensionAPI) {
 			// two-tool mode
 			if (phase.promoted) {
 				if (sid) maybeNotifyPromoted(sid, ctx.model!.id, cfg, ctx);
-				// Strip the injected output-budget cap so the host default returns.
-				const capped = capMaxTokens(
-					payload,
-					cfg.bootstrapMaxTokens,
-					true,
-				);
-				if (capped.changed) {
-					payload = capped.payload;
-					changed = true;
-				}
 				return changed ? payload : undefined;
-			}
-
-			// First request: cap the output budget before narrowing the catalog.
-			const capped = capMaxTokens(payload, cfg.bootstrapMaxTokens, false);
-			if (capped.changed) {
-				payload = capped.payload;
-				changed = true;
 			}
 
 			// Serialized tool catalog; selectBootstrapTools tries task-routing

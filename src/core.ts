@@ -64,16 +64,15 @@ const GLOB_REGEX_CACHE_MAX = 256;
 /** Minimal '*' glob match (case-insensitive). Non-glob patterns compare exactly. */
 export function matchGlob(pattern: string, value: string): boolean {
 	const p = pattern.toLowerCase();
-	const v = value.toLowerCase();
 	if (p === "*") return true;
-	if (!p.includes("*")) return p === v;
-	const escaped = pattern
-		.replace(/[.+^${}()|[\]\\]/g, "\\$&")
-		.replace(/\*/g, ".*");
-	let re = GLOB_REGEX_CACHE.get(escaped);
+	if (!p.includes("*")) return p === value.toLowerCase();
+	let re = GLOB_REGEX_CACHE.get(p);
 	if (!re) {
+		const escaped = p
+			.replace(/[.+^${}()|[\]\\]/g, "\\$&")
+			.replace(/\*/g, ".*");
 		re = new RegExp(`^${escaped}$`, "i");
-		GLOB_REGEX_CACHE.set(escaped, re);
+		GLOB_REGEX_CACHE.set(p, re);
 		if (GLOB_REGEX_CACHE.size > GLOB_REGEX_CACHE_MAX)
 			GLOB_REGEX_CACHE.clear();
 	}
@@ -806,9 +805,10 @@ export function selectZeroBootstrapTools(
 	if (boundary < 0 || compactionTools.length === 0) {
 		return { tools: [], missing: [] };
 	}
+	const availableSet = new Set(available);
 	const shells = available.filter((n) => n === "pwsh" || n === "bash");
 	if (shells.length === 0) return { tools: [], missing: ["bash/pwsh"] };
-	const missing = compactionTools.filter((n) => !available.includes(n));
+	const missing = compactionTools.filter((n) => !availableSet.has(n));
 	if (missing.length > 0) return { tools: [], missing };
 	return {
 		tools: [...new Set([...shells, ...compactionTools])],
