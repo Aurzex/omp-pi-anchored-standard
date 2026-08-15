@@ -94,8 +94,64 @@ export interface EntryLike {
 	message?: {
 		role?: string;
 		toolName?: string;
-		content?: Array<{ type?: string }> | string;
+		content?: Array<{ type?: string; text?: string }> | string;
 	};
+}
+
+export type TaskMode = "spec" | "react" | "weak";
+
+const REACT_RE =
+	/(开发|创建|写一个|生成|从零|做一个|游戏|网页|网站|构建|新项目|搭建|实现|做出|上线|落地|脚本|工具|应用|build|create|develop|generate|implement|make a|new project)/gi;
+const SPEC_RE =
+	/(修复|修一下|调试|重构|维护|排查|报错|出错|崩溃|优化|审查|review|fix|debug|refactor|maintain|repair|broken|break|为什么|异常|故障|迁移|升级|兼容)/gi;
+
+/**
+ * Task classifier ported from dsh-router-standard's `classifyTask`
+ * (P1-P24): clear keyword evidence picks a stable band (react for
+ * greenfield/build tasks, spec for maintenance/fix tasks); ambiguous or
+ * unmatched text returns `weak`, the internal-routing mode where the model
+ * decides per task.
+ */
+export function classifyTask(text: string): TaskMode {
+	const react = [...text.matchAll(REACT_RE)].length;
+	const spec = [...text.matchAll(SPEC_RE)].length;
+	if (react > spec) return "react";
+	if (spec > react) return "spec";
+	return "weak";
+}
+
+/** True when the routed model id is a Flash-family model. */
+export function isFlashModel(modelId: string): boolean {
+	return typeof modelId === "string" && /flash/i.test(modelId);
+}
+
+function contentToText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((c) => {
+			if (typeof c === "string") return c;
+			if (c && typeof c === "object" && "text" in c) {
+				const text = c.text;
+				if (typeof text === "string") return text;
+			}
+			return "";
+		})
+		.join(" ");
+}
+
+/**
+ * First durable user message text from host session entries, for the
+ * task-aware routing decision. Empty when no user message is durable yet.
+ */
+export function taskTextFromEntries(entries: EntryLike[]): string {
+	for (const e of entries) {
+		const m = e.message;
+		if (m?.role !== "user") continue;
+		const text = contentToText(m.content);
+		if (text.trim()) return text;
+	}
+	return "";
 }
 
 /**
@@ -262,6 +318,19 @@ export function lastUserIndex(messages: PayloadMessage[]): number {
 }
 
 /**
+ * First user message text from a serialized provider payload, for the
+ * task-aware routing decision. Empty when the payload has no user message.
+ */
+export function taskTextFromMessages(messages: PayloadMessage[]): string {
+	for (const m of messages) {
+		if (m?.role !== "user") continue;
+		const text = contentToText(m.content);
+		if (text.trim()) return text;
+	}
+	return "";
+}
+
+/**
  * Mirror the content shape of the message the anchor is appended after:
  * string user content stays a string, block content becomes a single text
  * block. Falls back to a string for anything else.
@@ -330,6 +399,100 @@ export function zeroAnchorPayload(
  * The byte string must not be invented or reworded. */
 export const MINIMAL_SYSTEM_PROMPT =
 	"You are a helpful software engineer assistant.";
+
+/** Hands-on doer persona from dsh-router-standard's react band. */
+export const REACT_PERSONA =
+	"You are a hands-on software engineer who delivers working output fast.\n" +
+	"Work directly: write or edit code, then verify it by reading and running. " +
+	"Keep the loop tight — produce, verify, fix — and do not build test " +
+	"harnesses, scaffolding, or ceremony the user did not ask for. " +
+	"Finish with a usable deliverable and a short summary.";
+
+/** Weak internal-routing persona for non-Flash models (dsh-router-standard w6c). */
+export const WEAK_PRO_PERSONA =
+	MINIMAL_SYSTEM_PROMPT +
+	"\nBefore acting, decide the task type (build or fix) and adopt the matching " +
+	"style: build → hands-on production; fix → inspect-and-plan.";
+
+/** Weak internal-routing persona for Flash-family models (dsh-router-standard w7). */
+export const WEAK_FLASH_PERSONA =
+	"You are a helpful assistant.\n" +
+	"Before acting, decide the task type (build or fix) and adopt the matching " +
+	"style: build → hands-on production; fix → inspect-and-plan.\n" +
+	"Before acting, briefly review what you have already done in this session " +
+	"and continue from where you left off; do not repeat completed steps. Do not " +
+	"run environment checks (echo, whoami, uname, node --version, date) or " +
+	"exhaustive grep/glob scans.";
+
+/** Model-specific optimum persona for a classified task mode. */
+export function routerPersonaFor(mode: TaskMode, modelId: string): string {
+	switch (mode) {
+		case "spec":
+			return MINIMAL_SYSTEM_PROMPT;
+		case "react":
+			return REACT_PERSONA;
+		case "weak":
+			return isFlashModel(modelId)
+				? WEAK_FLASH_PERSONA
+				: WEAK_PRO_PERSONA;
+	}
+}
+
+/**
+ * First-turn core tools for a classified task mode, ported from
+ * dsh-router-standard's `coreFor`: spec is read-first, react is write-first,
+ * weak keeps the write-first default (the model routes internally while the
+ * tool surface stays deterministic).
+ */
+export function routerBootstrapTools(mode: TaskMode): string[] {
+	switch (mode) {
+		case "spec":
+			return ["read", "edit", "glob", "grep"];
+		case "react":
+			return ["read", "write", "edit"];
+		case "weak":
+			return ["read", "write", "edit"];
+	}
+}
+
+/** Add the platform shell (`bash` or `pwsh`) to a bootstrap tool list. */
+export function withPlatformShell(
+	tools: string[],
+	available: string[],
+): string[] {
+	const shell = available.find((n) => n === "bash" || n === "pwsh");
+	return shell ? [...tools, shell] : tools;
+}
+
+/**
+ * Resolve the first-request bootstrap tools for two-tool mode. Task routing
+ * (dsh-router-standard) is tried first; when any router-selected tool is
+ * missing from the catalog, the configured `bootstrapTools` are used as the
+ * fallback, and only if those are missing too is the missing set reported
+ * (the caller then fails safe without narrowing).
+ */
+export function selectBootstrapTools(
+	cfg: { bootstrapTools: string[]; taskRouting: boolean },
+	mode: TaskMode,
+	available: string[],
+): { tools: string[]; missing: string[]; used: "router" | "configured" } {
+	if (cfg.taskRouting) {
+		const desired = withPlatformShell(
+			routerBootstrapTools(mode),
+			available,
+		);
+		const routerResolved = resolveBootstrap(available, desired);
+		if (routerResolved.missing.length === 0) {
+			return { tools: routerResolved.tools, missing: [], used: "router" };
+		}
+	}
+	const configured = resolveBootstrap(available, cfg.bootstrapTools);
+	return {
+		tools: configured.tools,
+		missing: configured.missing,
+		used: "configured",
+	};
+}
 
 export interface SystemPromptRewrite {
 	/** True when the payload was modified. */
@@ -441,6 +604,7 @@ export interface Config {
 	anchorText: string;
 	minimalSystemPrompt: boolean;
 	bootstrapMaxTokens: number;
+	taskRouting: boolean;
 }
 
 /**
@@ -470,15 +634,15 @@ export interface RawConfig {
 	anchorText?: string;
 	minimalSystemPrompt?: boolean;
 	bootstrapMaxTokens?: number;
+	taskRouting?: boolean;
 }
 
 /** Fixed anchor text from upstream zero-anchored-standard (config-overridable). */
 export const ANCHOR_TEXT =
 	"This round is a test. Tools are not open yet; all tools will open next round.";
-
 export const DEFAULTS: Config = {
 	enabled: true,
-	models: [],
+	models: ["deepseek-v4-pro"],
 	bootstrapTools: ["bash", "read"],
 	notify: true,
 	bootstrapMode: "two-tool",
@@ -486,6 +650,7 @@ export const DEFAULTS: Config = {
 	anchorText: ANCHOR_TEXT,
 	minimalSystemPrompt: true,
 	bootstrapMaxTokens: 1024,
+	taskRouting: true,
 };
 
 /**
@@ -533,5 +698,6 @@ export function applyDefaults(raw: RawConfig): Config {
 		bootstrapMaxTokens: isPositiveInt(raw.bootstrapMaxTokens)
 			? raw.bootstrapMaxTokens
 			: DEFAULTS.bootstrapMaxTokens,
+		taskRouting: raw.taskRouting ?? DEFAULTS.taskRouting,
 	};
 }

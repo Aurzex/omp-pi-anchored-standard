@@ -53,6 +53,7 @@ import {
 import {
 	applyDefaults,
 	capMaxTokens,
+	classifyTask,
 	deepMerge,
 	extractRaw,
 	filterTools,
@@ -65,11 +66,16 @@ import {
 	MINIMAL_SYSTEM_PROMPT,
 	modelMatches,
 	rewriteSystemPrompt,
+	routerPersonaFor,
+	selectBootstrapTools,
 	SessionPromotionMemo,
+	taskTextFromEntries,
+	taskTextFromMessages,
 	toolName,
 	zeroAnchorPayload,
 	type Config,
 	type EntryLike,
+	type PayloadMessage,
 	type RawConfig,
 	type ToolLike,
 } from "./core";
@@ -197,17 +203,30 @@ export default function (pi: ExtensionAPI) {
 		if (!payload || typeof payload !== "object") return;
 		let changed = false;
 
-		// Permanent: the DSH minimal persona replaces the host system prompt
-		// (co-equal trajectory anchor; only the tool catalog promotes).
+		const payloadMessages =
+			(payload.messages as PayloadMessage[] | undefined) ?? [];
+		const taskMode = classifyTask(taskTextFromMessages(payloadMessages));
+
+		// The DSH persona replaces the host system prompt permanently (only
+		// the tool catalog promotes). Task routing picks the measured optimum
+		// persona for the classified task; otherwise the minimal persona is
+		// used for every target model.
 		if (cfg.minimalSystemPrompt) {
-			const sp = rewriteSystemPrompt(payload, MINIMAL_SYSTEM_PROMPT);
+			const persona =
+				cfg.taskRouting && cfg.bootstrapMode === "two-tool"
+					? routerPersonaFor(taskMode, ctx.model!.id)
+					: MINIMAL_SYSTEM_PROMPT;
+			const sp = rewriteSystemPrompt(payload, persona);
 			if (sp.changed) {
 				payload = sp.payload as Record<string, unknown>;
 				changed = true;
 				if (sid && !spLogged.has(sid)) {
 					spLogged.add(sid);
 					console.log(
-						`[${EXT_NAME}] ${ctx.model!.provider}/${ctx.model!.id}: system prompt → DSH minimal persona`,
+						`[${EXT_NAME}] ${ctx.model!.provider}/${ctx.model!.id}: system prompt → ` +
+							(cfg.taskRouting && cfg.bootstrapMode === "two-tool"
+								? `route persona (${taskMode})`
+								: "DSH minimal persona"),
 					);
 				}
 			}
@@ -252,26 +271,34 @@ export default function (pi: ExtensionAPI) {
 			changed = true;
 		}
 
-		// Serialized tool catalog; filterTools validates membership by name.
+		// Serialized tool catalog; selectBootstrapTools tries task-routing
+		// first and falls back to the configured bootstrap tools.
 		const tools = payload.tools as ToolLike[] | undefined;
 		if (!Array.isArray(tools) || tools.length === 0)
 			return changed ? payload : undefined;
 
-		const result = filterTools(tools, cfg.bootstrapTools);
-		if (result.missing.length > 0) {
+		const available = tools
+			.map((t) => toolName(t))
+			.filter((n): n is string => typeof n === "string");
+		const selected = selectBootstrapTools(cfg, taskMode, available);
+		if (selected.missing.length > 0) {
 			// Configuration error — fail safe, never strip tools silently.
 			console.warn(
-				`[${EXT_NAME}] bootstrap tools missing from catalog: ${result.missing.join(", ")}; skipping filter`,
+				`[${EXT_NAME}] bootstrap tools missing from catalog: ${selected.missing.join(", ")}; skipping filter`,
 			);
 			return changed ? payload : undefined;
 		}
+		const result = filterTools(tools, selected.tools);
 		if (result.changed) {
 			payload = { ...payload, tools: result.tools };
 			changed = true;
 			if (sid) anchoredSessions.set(sid, true);
 			console.log(
 				`[${EXT_NAME}] anchoring first request for ${ctx.model!.provider}/${ctx.model!.id}: ` +
-					`${result.tools.length}/${tools.length} tools (${result.tools.map(toolName).join(", ")})`,
+					`${result.tools.length}/${tools.length} tools (${result.tools.map(toolName).join(", ")})` +
+					(selected.used === "router"
+						? ` [task-routing ${taskMode}]`
+						: ""),
 			);
 		}
 
@@ -310,6 +337,7 @@ export default function (pi: ExtensionAPI) {
 					? "assistant-message"
 					: cfg.promoteOn;
 			const promoted = isPromoted(entries, trigger);
+			const taskMode = classifyTask(taskTextFromEntries(entries));
 			const phase = !cfg.enabled
 				? "disabled"
 				: !matched
@@ -324,9 +352,10 @@ export default function (pi: ExtensionAPI) {
 				`mode: ${cfg.bootstrapMode}`,
 				`promote on: ${cfg.promoteOn}`,
 				`target models: ${cfg.models.join(", ") || "(none — no model is anchored)"}`,
+				`task routing: ${cfg.taskRouting ? `on (task=${taskMode})` : "off"}`,
 				`bootstrap tools: ${cfg.bootstrapTools.join(", ")}`,
 				`bootstrap max tokens: ${cfg.bootstrapMaxTokens}`,
-				`minimal system prompt: ${cfg.minimalSystemPrompt ? "on (DSH minimal persona)" : "off (host default)"}`,
+				`minimal system prompt: ${cfg.minimalSystemPrompt ? "on (DSH/route persona)" : "off (host default)"}`,
 				`current model: ${model ? `${model.provider}/${model.id}` : "n/a"}`,
 				`model matched: ${matched ? "yes" : "no"}`,
 				`phase: ${phase}`,

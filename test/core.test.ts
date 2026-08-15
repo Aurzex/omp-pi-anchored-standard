@@ -6,11 +6,13 @@ import {
 	anchorPayloadMessages,
 	applyDefaults,
 	capMaxTokens,
+	classifyTask,
 	deepMerge,
 	extractRaw,
 	filterTools,
 	hasAssistantMessage,
 	hasToolCallHistory,
+	isFlashModel,
 	isPositiveInt,
 	isPromoted,
 	isSubagentSession,
@@ -21,8 +23,13 @@ import {
 	modelMatches,
 	resolveBootstrap,
 	rewriteSystemPrompt,
+	routerBootstrapTools,
+	routerPersonaFor,
+	selectBootstrapTools,
 	SessionPromotionMemo,
 	shouldRestoreFullCatalog,
+	taskTextFromEntries,
+	taskTextFromMessages,
 	toolName,
 	zeroAnchorPayload,
 } from "../src/core.ts";
@@ -517,7 +524,7 @@ describe("extractRaw", () => {
 describe("applyDefaults", () => {
 	const fullDefaults = {
 		enabled: true,
-		models: [],
+		models: ["deepseek-v4-pro"],
 		bootstrapTools: ["bash", "read"],
 		notify: true,
 		bootstrapMode: "two-tool",
@@ -525,6 +532,7 @@ describe("applyDefaults", () => {
 		anchorText: ANCHOR_TEXT,
 		minimalSystemPrompt: true,
 		bootstrapMaxTokens: 1024,
+		taskRouting: true,
 	};
 
 	test("empty raw config resolves to DEFAULTS", () => {
@@ -557,6 +565,7 @@ describe("applyDefaults", () => {
 			anchorText: "custom",
 			minimalSystemPrompt: false,
 			bootstrapMaxTokens: 4096,
+			taskRouting: false,
 		});
 		assert.deepStrictEqual(cfg, {
 			enabled: false,
@@ -568,6 +577,7 @@ describe("applyDefaults", () => {
 			anchorText: "custom",
 			minimalSystemPrompt: false,
 			bootstrapMaxTokens: 4096,
+			taskRouting: false,
 		});
 	});
 	test("invalid bootstrapMode and promoteOn normalize to defaults", () => {
@@ -599,6 +609,168 @@ describe("applyDefaults", () => {
 	});
 	test("empty anchorText falls back to the default anchor", () => {
 		assert.equal(applyDefaults({ anchorText: "" }).anchorText, ANCHOR_TEXT);
+	});
+});
+
+describe("task routing helpers", () => {
+	test("classifyTask: build/greenfield tasks are react", () => {
+		assert.equal(
+			classifyTask("需要本地开发一个马里奥网页小游戏，参考经典原版"),
+			"react",
+		);
+		assert.equal(classifyTask("帮我写一个 Python 脚本处理 CSV"), "react");
+		assert.equal(classifyTask("从零搭建一个网站"), "react");
+	});
+
+	test("classifyTask: fix/maintenance tasks are spec", () => {
+		assert.equal(classifyTask("修复这个仓库里的 bug"), "spec");
+		assert.equal(classifyTask("为什么登录一直报错，帮我排查"), "spec");
+	});
+
+	test("classifyTask: ambiguous or unmatched text is weak", () => {
+		assert.equal(classifyTask("今天天气怎么样"), "weak");
+		assert.equal(classifyTask("开发并修复"), "weak");
+	});
+
+	test("classifyTask: net react keywords beat spec keywords", () => {
+		assert.equal(
+			classifyTask("帮我开发一个小游戏然后修复里面的 bug"),
+			"react",
+		);
+	});
+
+	test("isFlashModel detects flash-family ids", () => {
+		assert.equal(isFlashModel("deepseek-v4-flash"), true);
+		assert.equal(isFlashModel("deepseek-v4-pro"), false);
+	});
+
+	test("routerPersonaFor: spec uses the byte-identical minimal persona", () => {
+		assert.equal(
+			routerPersonaFor("spec", "deepseek-v4-pro"),
+			MINIMAL_SYSTEM_PROMPT,
+		);
+	});
+
+	test("routerPersonaFor: react is the hands-on doer persona", () => {
+		assert.ok(
+			routerPersonaFor("react", "deepseek-v4-pro").includes("hands-on"),
+		);
+		assert.ok(
+			routerPersonaFor("react", "deepseek-v4-pro").includes(
+				"do not build test harnesses",
+			),
+		);
+	});
+
+	test("routerPersonaFor: weak persona is model-specific", () => {
+		const pro = routerPersonaFor("weak", "deepseek-v4-pro");
+		const flash = routerPersonaFor("weak", "deepseek-v4-flash");
+		assert.ok(pro.includes("decide the task type (build or fix)"));
+		assert.ok(pro.includes(MINIMAL_SYSTEM_PROMPT));
+		assert.ok(!pro.includes("review what you have already done"));
+		assert.ok(flash.includes("review what you have already done"));
+		assert.notEqual(pro, flash);
+	});
+
+	test("routerBootstrapTools: spec is read-first, react/weak write-first", () => {
+		assert.deepStrictEqual(routerBootstrapTools("spec"), [
+			"read",
+			"edit",
+			"glob",
+			"grep",
+		]);
+		assert.deepStrictEqual(routerBootstrapTools("react"), [
+			"read",
+			"write",
+			"edit",
+		]);
+		assert.deepStrictEqual(routerBootstrapTools("weak"), [
+			"read",
+			"write",
+			"edit",
+		]);
+	});
+
+	test("selectBootstrapTools: task routing adds the platform shell", () => {
+		const selected = selectBootstrapTools(
+			{ bootstrapTools: ["bash", "read"], taskRouting: true },
+			"spec",
+			["bash", "read", "edit", "glob", "grep", "write"],
+		);
+		assert.equal(selected.used, "router");
+		assert.deepStrictEqual(selected.tools, [
+			"read",
+			"edit",
+			"glob",
+			"grep",
+			"bash",
+		]);
+		assert.deepStrictEqual(selected.missing, []);
+	});
+
+	test("selectBootstrapTools: falls back to configured tools when router tools are missing", () => {
+		const selected = selectBootstrapTools(
+			{ bootstrapTools: ["bash", "read"], taskRouting: true },
+			"spec",
+			["bash", "read"],
+		);
+		assert.equal(selected.used, "configured");
+		assert.deepStrictEqual(selected.tools, ["bash", "read"]);
+		assert.deepStrictEqual(selected.missing, []);
+	});
+
+	test("selectBootstrapTools: disabled routing uses configured tools", () => {
+		const selected = selectBootstrapTools(
+			{ bootstrapTools: ["bash"], taskRouting: false },
+			"react",
+			["bash", "read", "write", "edit"],
+		);
+		assert.equal(selected.used, "configured");
+		assert.deepStrictEqual(selected.tools, ["bash"]);
+	});
+
+	test("selectBootstrapTools: reports missing configured tools when routing falls back and fails", () => {
+		const selected = selectBootstrapTools(
+			{ bootstrapTools: ["bash", "pwsh"], taskRouting: true },
+			"spec",
+			["bash", "read"],
+		);
+		assert.equal(selected.used, "configured");
+		assert.deepStrictEqual(selected.missing, ["pwsh"]);
+	});
+
+	test("taskTextFromEntries extracts the first user message text", () => {
+		assert.equal(
+			taskTextFromEntries([
+				{ message: { role: "user", content: "修复这个 bug" } },
+				{ message: { role: "user", content: "开发一个游戏" } },
+			]),
+			"修复这个 bug",
+		);
+		assert.equal(
+			taskTextFromEntries([
+				{
+					message: {
+						role: "user",
+						content: [{ type: "text", text: "写一个脚本" }],
+					},
+				},
+			]),
+			"写一个脚本",
+		);
+		assert.equal(taskTextFromEntries([]), "");
+	});
+
+	test("taskTextFromMessages extracts the first user message text", () => {
+		assert.equal(
+			taskTextFromMessages([
+				{ role: "system", content: "s" },
+				{ role: "user", content: "修复这个 bug" },
+				{ role: "user", content: "开发一个游戏" },
+			]),
+			"修复这个 bug",
+		);
+		assert.equal(taskTextFromMessages([]), "");
 	});
 });
 

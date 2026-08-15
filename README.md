@@ -1,6 +1,6 @@
 # omp-pi-anchored-standard
 
-给 **omp**(Oh My Pi)和 **pi**(pi-coding-agent)用的 "anchored standard" 插件:把目标模型的**第一个请求**锚定到最小工具目录 + 小输出预算 + DSH minimal 系统人设,会话记录到**第一个持久提升信号**后恢复完整工具目录与正常预算。
+给 **omp**(Oh My Pi)和 **pi**(pi-coding-agent)用的 "anchored standard" 插件:把目标模型的**第一个请求**锚定到最小工具目录 + 小输出预算 + DSH 人设,会话记录到**第一个持久提升信号**后恢复完整工具目录与正常预算。**默认零配置可用**:未配置 `anchoredTools` 时自动锚定 `deepseek-v4-pro` 并启用任务感知路由(参考 [yjh051108/dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite))。
 
 ## 为什么存在
 
@@ -15,7 +15,7 @@ DeepSeek V4 Pro 对 API 可见的工具目录高度敏感。Project2 评测(Deep
 
 也就是:宽工具目录对**首请求**有害(高 `let me`、计划退化),但永久停在 Minimal 会丢掉 Standard 的工具集。两阶段做法:
 
-1. **第一个模型请求** → 只暴露 `bash` + `read`(`bootstrapMode: "two-tool"`,默认),或零工具 + 固定 anchor 回合(`bootstrapMode: "zero"`)。
+1. **第一个模型请求** → 只暴露首轮核心工具(`bootstrapMode: "two-tool"`,默认;任务感知路由下按任务类型选 `read`/`write`/`edit`/`glob`/`grep` + shell),或零工具 + 固定 anchor 回合(`bootstrapMode: "zero"`)。
 2. **第一个持久提升信号之后**(按 `promoteOn`)→ 恢复完整目录(能力无损失)。
 
 > 这是 prompt 条件化实验补丁,不是正确性保证;底层评测是单一私人评测,不是普适结论。无网络请求、无遥测。
@@ -27,11 +27,12 @@ DeepSeek V4 Pro 对 API 可见的工具目录高度敏感。Project2 评测(Deep
 - 目录每会话**只变一次**(一次 request-prefix cache 断层)。
 - 阶段从**持久会话条目**推导(`getBranch()` / `buildContextEntries()`),`/resume`、`/reload` 自动保留。
 - 配置里的 bootstrap 工具名在目录里缺失 → **fail-safe**:跳过过滤并告警,绝不静默剥工具。
-- 非目标模型完全不受影响;`models` 默认空数组 = 谁也不锚定(安全默认)。
+- 非目标模型完全不受影响;`models` 默认 `["deepseek-v4-pro"]`(零配置即可用),显式配置 `[]` 才不锚定任何模型。
 - 两阶段提升决策按会话 id 在进程内记忆,扫描只做一次。
 - **宿主机制不同**(行为一致):omp 侧通过 `pi.setActiveTools()` 原生收窄/恢复活动工具集(`before_provider_request` 的 payload 替换在 openai-completions 传输层被丢弃,不可靠),zero 模式 anchor 消息经 `context` 事件注入(序列化前生效,所有传输层都遵守);pi 侧沿用 pi 移植的 `before_provider_request` payload 过滤(pi 端口已验证有效)。
 - **`minimalSystemPrompt`(默认 `true`)**:目标模型的系统提示被整体改写为 DSH minimal 人设(`You are a helpful software engineer assistant.`,与上游 Harness `minimal` preset 逐字节一致)。这是与工具目录**同级**的轨迹锚点:改写措辞会破坏 `We need` 推理风格,故永久生效(整段会话),只有工具目录提升。设 `false` 保留宿主默认系统提示。omp 经 `before_agent_start` 返回 `systemPrompt` 替换;pi 经 payload 的顶层 `system` / `messages[0]`(role `system`/`developer`)改写。
 - **`bootstrapMaxTokens`(默认 `1024`,仅 pi)**:首请求输出预算封顶(上游 issue #6:首请求 `max_tokens` 主导轨迹锚点——1024 复现 `We need` 风格 26/32 次,而适配器默认 256000 是 0/5)。提升后剥离注入的上限,恢复宿主默认。omp 无原生 max-token 控制且 `before_provider_request` 返回值被 openai-completions 传输层丢弃,故此配置在 omp 侧仅做校验、不生效。
+- **`taskRouting`(默认 `true`,仅 `two-tool` 模式)**:参考 [dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite) / dsh-router-standard 的实测路由(Pro 按任务选 persona;Flash 用 neutral + classify)。首轮前从会话第一条用户消息分类任务:`react`(新建/开发)→ doer persona + 写优先工具(`read`/`write`/`edit`);`spec`(修复/维护)→ DSH minimal persona + 读优先工具(`read`/`edit`/`glob`/`grep`);`weak`(模糊/无关键词)→ 模型自分类 persona(w6c/w7)+ 写优先工具。路由工具缺失时回退到 `bootstrapTools`,再缺失才 fail-safe。设 `false` 恢复纯 anchored-standard 行为(固定 persona + 固定 `bootstrapTools`)。
 
 上游新增的实验对比模式:首请求**零工具** + 一条固定 anchor 用户消息(默认 `This round is a test. Tools are not open yet; all tools will open next round.`,可配置),让第一条推理链走零注入轨迹;anchor 回复落库后恢复完整目录。本插件的移植:
 
@@ -76,19 +77,20 @@ omp plugin install github:Aurzex/omp-pi-anchored-standard
 > cp -r /path/to/omp-pi-anchored-standard ~/.omp/agent/extensions/omp-pi-anchored-standard
 > ```
 
-然后配置(全局 `~/.omp/agent/config.yml`,或某项目的 `<项目>/.omp/config.yml`):
+默认配置即可用(自动锚定 `deepseek-v4-pro`,任务感知路由开启)。如需覆盖,在全局 `~/.omp/agent/config.yml` 或某项目的 `<项目>/.omp/config.yml` 配置:
 
 ```yaml
 anchoredTools:
     enabled: true
     models:
-        - deepseek-v4-flash # glob;含 "/" 只匹配 "provider/modelId",裸名两种都匹配
+        - deepseek-v4-pro # 默认值;glob;含 "/" 只匹配 "provider/modelId",裸名两种都匹配
     bootstrapMode: two-tool # "two-tool" | "zero"
     bootstrapTools:
         - bash
-        - read # two-tool 模式专用
+        - read # taskRouting 关闭或路由工具缺失时的回退集
     promoteOn: either # "tool-call" | "assistant-message" | "either"
-    minimalSystemPrompt: true # 系统提示 → DSH minimal 人设(永久)
+    minimalSystemPrompt: true # 系统提示 → DSH/route persona(永久)
+    taskRouting: true # 任务感知路由;false = 纯 anchored-standard
     bootstrapMaxTokens: 1024 # 首请求输出预算上限(仅 pi 生效)
     notify: true # 提升时一次性 TUI 通知
 ```
@@ -106,10 +108,10 @@ pi install omp-pi-anchored-standard
 或把仓库加进 `~/.pi/agent/settings.json` 的 `packages`,`/reload` 后自动安装:
 
 ```jsonc
-{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.3.0"] }
+{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.4.0"] }
 ```
 
-然后配置(全局 `~/.pi/agent/settings.json` + 可信项目的 `.pi/settings.json` 覆盖,语义同上):
+默认配置即可用(自动锚定 `deepseek-v4-pro`,任务感知路由开启)。如需覆盖,在全局 `~/.pi/agent/settings.json` + 可信项目的 `.pi/settings.json` 配置(语义同上):
 
 ```jsonc
 {
@@ -120,6 +122,7 @@ pi install omp-pi-anchored-standard
 		"bootstrapTools": ["bash", "read"],
 		"promoteOn": "either",
 		"minimalSystemPrompt": true,
+		"taskRouting": true,
 		"bootstrapMaxTokens": 1024,
 		"anchorText": "This round is a test. Tools are not open yet; all tools will open next round.",
 		"notify": true,
@@ -129,18 +132,19 @@ pi install omp-pi-anchored-standard
 
 改完 `/reload`。
 
-> 版本锁:git 安装可用 `@v0.3.0`(pi)/ `#v0.3.0`(omp);npm 安装默认就是 `latest`(`0.3.0`)。
+> 版本锁:git 安装可用 `@v0.4.0`(pi)/ `#v0.4.0`(omp);npm 安装默认就是 `latest`(`0.4.0`)。
 
 ## 验证
 
-会话里跑 `/anchored-tools`,报告当前模型、是否命中目标、模式、提升触发器、当前阶段(`bootstrap` / `promoted (full catalog)` / `not-targeted` / `disabled`)。
+会话里跑 `/anchored-tools`,报告当前模型、是否命中目标、模式、任务路由、提升触发器、当前阶段(`bootstrap` / `promoted (full catalog)` / `not-targeted` / `disabled`)。
 
 首次锚定与系统提示改写会打日志(omp 走 `pi.logger`,pi 走 console):
 
 ```
-[anchored-tools] anchoring first request for deepseek/deepseek-v4-flash: 2/25 tools (bash, read)   # two-tool
-[anchored-tools] anchoring first request for deepseek/deepseek-v4-flash: 0 tools (zero-tool anchor) # zero
-[anchored-tools] deepseek/deepseek-v4-flash: system prompt → DSH minimal persona                     # minimalSystemPrompt
+[anchored-tools] anchoring first request for deepseek/deepseek-v4-pro: 5/25 tools (read, edit, glob, grep, bash) [task-routing spec]   # two-tool
+[anchored-tools] anchoring first request for deepseek/deepseek-v4-pro: 4/25 tools (read, write, edit, bash) [task-routing react]      # two-tool
+[anchored-tools] anchoring first request for deepseek/deepseek-v4-flash: 0 tools (zero-tool anchor)                                  # zero
+[anchored-tools] deepseek/deepseek-v4-pro: system prompt → route persona (react)                                                     # taskRouting
 ```
 
 ## 开发
@@ -158,7 +162,7 @@ npm test            # node --test(原生 TS,无需 bun;bun 环境同样可跑 no
 - `bootstrapMode: "zero"` 的 anchor 轮结束需用户继续一句(真实消息不自动推迟),见上文差异说明。
 - pi 侧无 `session_init` 条目,zero 模式的子代理豁免仅 omp 生效。
 - `bootstrapMaxTokens` 仅 pi 生效:omp 无原生 max-token setter,且其 `before_provider_request` 返回值被 openai-completions 传输层丢弃(见上),故 omp 只校验该配置、不施加输出预算封顶。
-- `models` 必须在配置里显式列出目标模型;默认空数组不锚定任何模型。
+- `models` 默认 `["deepseek-v4-pro"]`;显式配置 `[]` 可关闭锚定,不再要求用户必须配置目标模型。
 
 ## License
 

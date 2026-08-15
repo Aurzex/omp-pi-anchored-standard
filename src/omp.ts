@@ -67,6 +67,7 @@ import {
 import {
 	anchorPayloadMessages,
 	applyDefaults,
+	classifyTask,
 	deepMerge,
 	extractRaw,
 	isBootstrapMode,
@@ -77,13 +78,16 @@ import {
 	memoizedIsPromoted,
 	MINIMAL_SYSTEM_PROMPT,
 	modelMatches,
-	resolveBootstrap,
+	routerPersonaFor,
+	selectBootstrapTools,
 	SessionPromotionMemo,
 	shouldRestoreFullCatalog,
+	taskTextFromEntries,
 	type Config,
 	type EntryLike,
 	type PayloadMessage,
 	type RawConfig,
+	type TaskMode,
 } from "./core";
 
 const EXT_NAME = "anchored-tools";
@@ -172,6 +176,9 @@ export default function (pi: ExtensionAPI) {
 		cfg.enabled &&
 		modelMatches(model.id, model.provider, cfg.models);
 
+	/** Classify the session's first durable user message (3+ call sites). */
+	const taskModeFor = (entries: EntryLike[]): TaskMode =>
+		classifyTask(taskTextFromEntries(entries));
 	const trigger = (
 		cfg: Config,
 	): "tool-call" | "assistant-message" | "either" =>
@@ -219,27 +226,32 @@ export default function (pi: ExtensionAPI) {
 		}
 		const sid = ctx.sessionManager.getSessionId();
 		if (!sid || narrowed.has(sid)) return;
-		let entries: EntryLike[] | undefined;
+		const branch = ctx.sessionManager.getBranch();
 		const promoted = memoizedIsPromoted(
 			promotionMemo,
 			sid,
 			trigger(cfg),
-			() => {
-				const branch = ctx.sessionManager.getBranch();
-				entries = branch;
-				return branch;
-			},
+			() => branch,
 		);
 		if (promoted) return; // already promoted (resume/reload)
-		if (cfg.bootstrapMode === "zero" && isSubagentSession(entries ?? []))
-			return; // subagents full catalog
+		if (cfg.bootstrapMode === "zero" && isSubagentSession(branch)) return; // subagents full catalog
 
 		const full = pi.getActiveTools();
 		let target: string[];
+		let routed = false;
 		if (cfg.bootstrapMode === "zero") {
 			target = [];
 		} else {
-			const resolved = resolveBootstrap(full, cfg.bootstrapTools);
+			const taskText = taskTextFromEntries(branch);
+			// Task routing needs the first durable user message. When it is
+			// not durable yet, fall back to the configured bootstrap set
+			// instead of exposing the full catalog.
+			const routingCfg =
+				cfg.taskRouting && taskText.trim()
+					? cfg
+					: { ...cfg, taskRouting: false };
+			const mode = classifyTask(taskText);
+			const resolved = selectBootstrapTools(routingCfg, mode, full);
 			if (resolved.missing.length > 0) {
 				// Configuration error — fail safe, never strip tools silently.
 				logger.warn(
@@ -248,6 +260,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			target = resolved.tools;
+			routed = resolved.used === "router";
 		}
 
 		narrowed.add(sid);
@@ -257,7 +270,10 @@ export default function (pi: ExtensionAPI) {
 			`[${EXT_NAME}] anchoring first request for ${ctx.model!.provider}/${ctx.model!.id}: ` +
 				(cfg.bootstrapMode === "zero"
 					? "0 tools (zero-tool anchor)"
-					: `${target.length}/${full.length} tools (${target.join(", ")})`),
+					: `${target.length}/${full.length} tools (${target.join(", ")})` +
+						(routed
+							? ` [task-routing ${taskModeFor(branch)}]`
+							: "")),
 		);
 	};
 
@@ -290,17 +306,31 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	// Narrow before the first request is serialized. session_start may run
-	// before the model is known; before_agent_start always has it.
+	// before the model is known; before_agent_start always has it. Task
+	// routing needs the first user message too, so those sessions defer to
+	// before_agent_start instead of narrowing too early.
 	pi.on("session_start", async (event, ctx) => {
-		await ensureNarrowed(ctx, loadConfig(ctx, logger));
+		const cfg = loadConfig(ctx, logger);
+		if (cfg.taskRouting && cfg.bootstrapMode === "two-tool") return;
+		await ensureNarrowed(ctx, cfg);
 	});
 	pi.on("before_agent_start", async (event, ctx) => {
 		const cfg = loadConfig(ctx, logger);
 		await ensureNarrowed(ctx, cfg);
-		// Permanent: the DSH minimal persona replaces the whole system prompt
-		// (co-equal trajectory anchor; only the tool catalog promotes).
+		// The DSH persona replaces the whole system prompt permanently (only
+		// the tool catalog promotes). Task routing picks the measured optimum
+		// persona for the classified task; otherwise the minimal persona is
+		// used for every target model.
 		if (cfg.minimalSystemPrompt && isTarget(ctx.model, cfg)) {
-			return { systemPrompt: [MINIMAL_SYSTEM_PROMPT] };
+			const branch = ctx.sessionManager.getBranch();
+			const taskText = taskTextFromEntries(branch);
+			const persona =
+				cfg.taskRouting &&
+				cfg.bootstrapMode === "two-tool" &&
+				taskText.trim()
+					? routerPersonaFor(classifyTask(taskText), ctx.model!.id)
+					: MINIMAL_SYSTEM_PROMPT;
+			return { systemPrompt: [persona] };
 		}
 	});
 
@@ -359,6 +389,11 @@ export default function (pi: ExtensionAPI) {
 			const matched = isTarget(model, cfg);
 			const entries = ctx.sessionManager.getBranch();
 			const promoted = isPromoted(entries, trigger(cfg));
+			const taskMode = taskModeFor(entries);
+			const selected =
+				cfg.bootstrapMode === "two-tool"
+					? selectBootstrapTools(cfg, taskMode, pi.getActiveTools())
+					: undefined;
 			const phase = !cfg.enabled
 				? "disabled"
 				: !matched
@@ -367,15 +402,16 @@ export default function (pi: ExtensionAPI) {
 						? "promoted (full catalog)"
 						: cfg.bootstrapMode === "zero"
 							? "bootstrap (zero-tool anchor)"
-							: `bootstrap (${cfg.bootstrapTools.join(", ")} only)`;
+							: `bootstrap (${selected?.tools.join(", ") ?? cfg.bootstrapTools.join(", ")} only)`;
 			const lines = [
 				`enabled: ${cfg.enabled}`,
 				`mode: ${cfg.bootstrapMode}`,
 				`promote on: ${cfg.promoteOn}`,
 				`target models: ${cfg.models.join(", ") || "(none — no model is anchored)"}`,
-				`bootstrap tools: ${cfg.bootstrapTools.join(", ")}`,
+				`task routing: ${cfg.taskRouting ? `on (task=${taskMode})` : "off"}`,
+				`bootstrap tools: ${selected ? `${selected.tools.join(", ")} (${selected.used})` : cfg.bootstrapTools.join(", ")}`,
 				`bootstrap max tokens: ${cfg.bootstrapMaxTokens}${cfg.bootstrapMode === "two-tool" ? " (pi only)" : ""}`,
-				`minimal system prompt: ${cfg.minimalSystemPrompt ? "on (DSH minimal persona)" : "off (host default)"}`,
+				`minimal system prompt: ${cfg.minimalSystemPrompt ? "on (DSH/route persona)" : "off (host default)"}`,
 				`current model: ${model ? `${model.provider}/${model.id}` : "n/a"}`,
 				`model matched: ${matched ? "yes" : "no"}`,
 				`phase: ${phase}`,
