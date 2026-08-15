@@ -31,7 +31,7 @@ DeepSeek V4 Pro 对 API 可见的工具目录高度敏感。Project2 评测(Deep
 - 两阶段提升决策按会话 id 在进程内记忆,扫描只做一次。
 - **宿主机制不同**(行为一致):omp 侧通过 `pi.setActiveTools()` 原生收窄/恢复活动工具集(`before_provider_request` 的 payload 替换在 openai-completions 传输层被丢弃,不可靠),zero 模式 anchor 消息经 `context` 事件注入(序列化前生效,所有传输层都遵守);pi 侧沿用 pi 移植的 `before_provider_request` payload 过滤(pi 端口已验证有效)。
 - **`minimalSystemPrompt`(默认 `true`)**:目标模型的系统提示被整体改写为 DSH minimal 人设(`You are a helpful software engineer assistant.`,与上游 Harness `minimal` preset 逐字节一致)。这是与工具目录**同级**的轨迹锚点:改写措辞会破坏 `We need` 推理风格,故永久生效(整段会话),只有工具目录提升。设 `false` 保留宿主默认系统提示。omp 经 `before_agent_start` 返回 `systemPrompt` 替换;pi 经 payload 的顶层 `system` / `messages[0]`(role `system`/`developer`)改写。
-- **`bootstrapMaxTokens`(默认 `1024`,仅 pi)**:首请求输出预算封顶(上游 issue #6:首请求 `max_tokens` 主导轨迹锚点——1024 复现 `We need` 风格 26/32 次,而适配器默认 256000 是 0/5)。提升后剥离注入的上限,恢复宿主默认。omp 无原生 max-token 控制且 `before_provider_request` 返回值被 openai-completions 传输层丢弃,故此配置在 omp 侧仅做校验、不生效。
+- **`bootstrapMaxTokens`(默认不封顶,仅 pi)**:可选的首请求输出预算封顶。上游 issue #11 实测:Minimal 工具 schema 在适配器默认 maxTokens(256000)下**无需封顶**即可锚定 `We need` 轨迹(5/5),而封顶的送达依赖 profile package 的 `prepareCall` 行为(rc.5 源码可达请求,rc.6 预构建包会被 `adapterDefaults.maxTokens` 覆盖)。故默认不封顶(opt-in);配置后才封顶,提升后剥离注入的上限。omp 无原生 max-token 控制且 `before_provider_request` 返回值被 openai-completions 传输层丢弃,故此配置在 omp 侧仅做校验、不生效。
 - **`taskRouting`(默认 `false`,仅 `two-tool` 模式)**:参考 [dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite) / dsh-router-standard 的实测路由(Pro 按任务选 persona;Flash 用 neutral + classify)。首轮前从会话第一条用户消息分类任务:`react`(新建/开发)→ doer persona + 写优先工具(`read`/`write`/`edit`);`spec`(修复/维护)→ DSH minimal persona + 读优先工具(`read`/`edit`/`glob`/`grep`);`weak`(模糊/无关键词)→ 模型自分类 persona(w6c/w7)+ 写优先工具。路由工具缺失时回退到 `bootstrapTools`,再缺失才 fail-safe。默认 `false` 走纯 anchored-standard(固定 DSH minimal persona + `bootstrapTools`),实测稳定复现 `We need` 风格;设 `true` 启用任务感知路由。
 
 上游新增的实验对比模式:首请求**零工具** + 一条固定 anchor 用户消息(默认 `This round is a test. Tools are not open yet; all tools will open next round.`,可配置),让第一条推理链走零注入轨迹;anchor 回复落库后恢复完整目录。本插件的移植:
@@ -49,12 +49,12 @@ src/
   omp.ts    # omp 入口:setActiveTools 收窄/恢复 + context 注入 anchor + before_agent_start 替换 systemPrompt + config.yml(YAML)
   pi.ts     # pi 入口:before_provider_request + buildContextEntries() + settings.json
 test/
-  core.test.ts   # node:test 单测(78 例)
+  core.test.ts   # node:test 单测(102 例)
 ```
 
 ## 安装
 
-已发布到 npm(`omp-pi-anchored-standard@0.3.0`)。仓库的 `package.json` 也声明了两个宿主的入口(`omp.extensions` / `pi.extensions`),npm 与 git 安装都会自动加载正确入口。
+已发布到 npm(`omp-pi-anchored-standard@0.5.0`)。仓库的 `package.json` 也声明了两个宿主的入口(`omp.extensions` / `pi.extensions`),npm 与 git 安装都会自动加载正确入口。
 
 ### omp
 
@@ -91,7 +91,7 @@ anchoredTools:
     promoteOn: either # "tool-call" | "assistant-message" | "either"
     minimalSystemPrompt: true # 系统提示 → DSH/route persona(永久)
     taskRouting: false # 默认,纯 anchored-standard(稳定 `We need`);true = 任务感知路由
-    bootstrapMaxTokens: 1024 # 首请求输出预算上限(仅 pi 生效)
+    bootstrapMaxTokens: 1024 # 可选:首请求输出预算封顶(默认不封顶;仅 pi 生效)
     notify: true # 提升时一次性 TUI 通知
 ```
 
@@ -108,7 +108,7 @@ pi install omp-pi-anchored-standard
 或把仓库加进 `~/.pi/agent/settings.json` 的 `packages`,`/reload` 后自动安装:
 
 ```jsonc
-{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.4.2"] }
+{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.5.0"] }
 ```
 
 默认配置即可用(自动锚定 `deepseek-v4-pro`,纯 anchored-standard;`taskRouting` 默认关闭)。如需覆盖,在全局 `~/.pi/agent/settings.json` + 可信项目的 `.pi/settings.json` 配置(语义同上):
@@ -132,7 +132,7 @@ pi install omp-pi-anchored-standard
 
 改完 `/reload`。
 
-> 版本锁:git 安装可用 `@v0.4.2`(pi)/ `#v0.4.2`(omp);npm 安装默认就是 `latest`(`0.4.2`)。
+> 版本锁:git 安装可用 `@v0.5.0`(pi)/ `#v0.5.0`(omp);npm 安装默认就是 `latest`(`0.5.0`)。
 
 ## 验证
 
@@ -161,8 +161,9 @@ npm test            # node --test(原生 TS,无需 bun;bun 环境同样可跑 no
 - omp 的 `before_provider_request` payload 替换对 openai-completions 传输(deepseek 等)无效(上游丢弃返回值),故 omp 入口不依赖它。
 - `bootstrapMode: "zero"` 的 anchor 轮结束需用户继续一句(真实消息不自动推迟),见上文差异说明。
 - pi 侧无 `session_init` 条目,zero 模式的子代理豁免仅 omp 生效。
-- `bootstrapMaxTokens` 仅 pi 生效:omp 无原生 max-token setter,且其 `before_provider_request` 返回值被 openai-completions 传输层丢弃(见上),故 omp 只校验该配置、不施加输出预算封顶。
+- `bootstrapMaxTokens` 默认不封顶(opt-in),且仅 pi 生效:omp 无原生 max-token setter,其 `before_provider_request` 返回值被 openai-completions 传输层丢弃(见上),故 omp 只校验该配置、不施加输出预算封顶。
 - `models` 默认 `["deepseek-v4-pro"]`;显式配置 `[]` 可关闭锚定,不再要求用户必须配置目标模型。
+- 上游 `suppressedContextSources`(issue #11:首请求剥离自动注入的 AGENTS.md / skill-catalog 上下文)未移植:omp/pi 的消息模型没有 `source.kind` 字段,无法按来源标识自动注入的上下文;工具 schema + persona 已覆盖该锚点。
 
 ## License
 

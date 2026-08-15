@@ -149,7 +149,7 @@ function loadConfig(
 		!isPositiveInt(merged.bootstrapMaxTokens)
 	) {
 		logger.warn(
-			`[${EXT_NAME}] invalid bootstrapMaxTokens ${JSON.stringify(merged.bootstrapMaxTokens)}; using 1024`,
+			`[${EXT_NAME}] invalid bootstrapMaxTokens ${JSON.stringify(merged.bootstrapMaxTokens)}; using no cap (default)`,
 		);
 	}
 	return applyDefaults(merged);
@@ -417,7 +417,7 @@ export default function (pi: ExtensionAPI) {
 				`target models: ${cfg.models.join(", ") || "(none — no model is anchored)"}`,
 				`task routing: ${cfg.taskRouting ? `on (task=${taskMode})` : "off"}`,
 				`bootstrap tools: ${selected ? `${selected.tools.join(", ")} (${selected.used})` : cfg.bootstrapTools.join(", ")}`,
-				`bootstrap max tokens: ${cfg.bootstrapMaxTokens}${cfg.bootstrapMode === "two-tool" ? " (pi only)" : ""}`,
+				`bootstrap max tokens: ${cfg.bootstrapMaxTokens ?? "off (default)"}${cfg.bootstrapMode === "two-tool" ? " (pi only)" : ""}`,
 				`minimal system prompt: ${cfg.minimalSystemPrompt ? "on (DSH/route persona)" : "off (host default)"}`,
 				`current model: ${model ? `${model.provider}/${model.id}` : "n/a"}`,
 				`model matched: ${matched ? "yes" : "no"}`,

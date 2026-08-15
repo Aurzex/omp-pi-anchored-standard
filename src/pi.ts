@@ -15,7 +15,7 @@
  *   1. For a configured target model, the FIRST provider request exposes only
  *      the bootstrap catalog (default: `bash` + `read`), or zero tools with a
  *      fixed anchor turn in `bootstrapMode: "zero"`, and its output budget is
- *      capped at `bootstrapMaxTokens` (default 1024).
+ *      optionally capped at `bootstrapMaxTokens` (unset = no cap).
  *   2. After the session's first durable promotion signal (per `promoteOn`),
  *      every later request exposes the full catalog and the normal budget.
  *
@@ -37,7 +37,7 @@
  *       "bootstrapMode": "two-tool",         // "two-tool" | "zero"
  *       "promoteOn": "either",               // "tool-call" | "assistant-message" | "either"
  *       "minimalSystemPrompt": true,         // system prompt → DSH minimal persona (permanent)
- *       "bootstrapMaxTokens": 1024,          // first-request output-budget cap
+ *       "bootstrapMaxTokens": 1024,          // optional cap; unset = no cap
  *       "anchorText": "This round is a test. Tools are not open yet; all tools will open next round.",
  *     }
  *   }
@@ -128,7 +128,7 @@ function loadConfig(
 		!isPositiveInt(merged.bootstrapMaxTokens)
 	) {
 		warn(
-			`[${EXT_NAME}] invalid bootstrapMaxTokens ${JSON.stringify(merged.bootstrapMaxTokens)}; using 1024`,
+			`[${EXT_NAME}] invalid bootstrapMaxTokens ${JSON.stringify(merged.bootstrapMaxTokens)}; using no cap (default)`,
 		);
 	}
 	return applyDefaults(merged);
@@ -354,7 +354,7 @@ export default function (pi: ExtensionAPI) {
 				`target models: ${cfg.models.join(", ") || "(none — no model is anchored)"}`,
 				`task routing: ${cfg.taskRouting ? `on (task=${taskMode})` : "off"}`,
 				`bootstrap tools: ${cfg.bootstrapTools.join(", ")}`,
-				`bootstrap max tokens: ${cfg.bootstrapMaxTokens}`,
+				`bootstrap max tokens: ${cfg.bootstrapMaxTokens ?? "off (default)"}`,
 				`minimal system prompt: ${cfg.minimalSystemPrompt ? "on (DSH/route persona)" : "off (host default)"}`,
 				`current model: ${model ? `${model.provider}/${model.id}` : "n/a"}`,
 				`model matched: ${matched ? "yes" : "no"}`,

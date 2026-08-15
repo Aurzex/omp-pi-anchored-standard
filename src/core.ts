@@ -552,17 +552,20 @@ export function rewriteSystemPrompt(
 const MAX_TOKENS_FIELDS = ["max_tokens", "max_completion_tokens"] as const;
 
 /**
- * Cap the first request's output budget (upstream issue #6: the first
- * request's `max_tokens` dominates the trajectory anchor). During bootstrap
- * the field is set to `bootstrapMaxTokens`; after promotion the injected cap
- * is stripped so the host default returns. A different value is preserved.
- * Returns the same reference when nothing changed.
+ * Cap the first request's output budget. The cap is OPT-IN (upstream issue
+ * #11): the Minimal tool schema anchors the `We need` trajectory at the
+ * adapter-default maxTokens, so `bootstrapMaxTokens` defaults to `undefined`
+ * (no cap). When configured, the field is set to the cap during bootstrap and
+ * the injected cap is stripped after promotion so the host default returns.
+ * A different value is preserved. Returns the same reference when nothing
+ * changed.
  */
 export function capMaxTokens(
 	payload: Record<string, unknown>,
-	bootstrapMaxTokens: number,
+	bootstrapMaxTokens: number | undefined,
 	promoted: boolean,
 ): { changed: boolean; payload: Record<string, unknown> } {
+	if (bootstrapMaxTokens === undefined) return { changed: false, payload };
 	const field = MAX_TOKENS_FIELDS.find((f) => typeof payload[f] === "number");
 	if (!field) return { changed: false, payload };
 	if (promoted) {
@@ -603,7 +606,7 @@ export interface Config {
 	promoteOn: PromoteOn;
 	anchorText: string;
 	minimalSystemPrompt: boolean;
-	bootstrapMaxTokens: number;
+	bootstrapMaxTokens: number | undefined;
 	taskRouting: boolean;
 }
 
@@ -649,7 +652,7 @@ export const DEFAULTS: Config = {
 	promoteOn: "either",
 	anchorText: ANCHOR_TEXT,
 	minimalSystemPrompt: true,
-	bootstrapMaxTokens: 1024,
+	bootstrapMaxTokens: undefined,
 	taskRouting: false,
 };
 
@@ -697,7 +700,7 @@ export function applyDefaults(raw: RawConfig): Config {
 			raw.minimalSystemPrompt ?? DEFAULTS.minimalSystemPrompt,
 		bootstrapMaxTokens: isPositiveInt(raw.bootstrapMaxTokens)
 			? raw.bootstrapMaxTokens
-			: DEFAULTS.bootstrapMaxTokens,
+			: undefined,
 		taskRouting: raw.taskRouting ?? DEFAULTS.taskRouting,
 	};
 }

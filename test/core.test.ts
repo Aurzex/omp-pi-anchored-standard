@@ -531,7 +531,7 @@ describe("applyDefaults", () => {
 		promoteOn: "either",
 		anchorText: ANCHOR_TEXT,
 		minimalSystemPrompt: true,
-		bootstrapMaxTokens: 1024,
+		bootstrapMaxTokens: undefined,
 		taskRouting: false,
 	};
 
@@ -588,23 +588,23 @@ describe("applyDefaults", () => {
 		assert.equal(cfg.bootstrapMode, "two-tool");
 		assert.equal(cfg.promoteOn, "either");
 	});
-	test("invalid bootstrapMaxTokens normalizes to the default", () => {
+	test("invalid bootstrapMaxTokens leaves the cap off", () => {
 		assert.equal(
 			applyDefaults({ bootstrapMaxTokens: 0 }).bootstrapMaxTokens,
-			1024,
+			undefined,
 		);
 		assert.equal(
 			applyDefaults({ bootstrapMaxTokens: -1 }).bootstrapMaxTokens,
-			1024,
+			undefined,
 		);
 		assert.equal(
 			applyDefaults({ bootstrapMaxTokens: 1.5 }).bootstrapMaxTokens,
-			1024,
+			undefined,
 		);
 		assert.equal(
 			applyDefaults({ bootstrapMaxTokens: "1024" as unknown as number })
 				.bootstrapMaxTokens,
-			1024,
+			undefined,
 		);
 	});
 	test("empty anchorText falls back to the default anchor", () => {
@@ -1000,6 +1000,16 @@ describe("capMaxTokens", () => {
 	});
 	test("no max-token field is untouched", () => {
 		assert.equal(capMaxTokens({ model: "x" }, 1024, false).changed, false);
+	});
+	test("undefined cap is a no-op in both phases", () => {
+		assert.equal(
+			capMaxTokens({ max_tokens: 384000 }, undefined, false).changed,
+			false,
+		);
+		assert.equal(
+			capMaxTokens({ max_tokens: 1024 }, undefined, true).changed,
+			false,
+		);
 	});
 });
 
