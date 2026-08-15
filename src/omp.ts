@@ -212,7 +212,11 @@ export default function (pi: ExtensionAPI) {
 	 * serialized. Idempotent per session; fails safe (warn + skip) when a
 	 * configured bootstrap tool is missing from the catalog.
 	 */
-	const ensureNarrowed = async (ctx: ExtensionContext, cfg: Config) => {
+	const ensureNarrowed = async (
+		ctx: ExtensionContext,
+		cfg: Config,
+		prompt?: string,
+	) => {
 		if (!cfg.enabled || cfg.models.length === 0) {
 			await ensureRestored(ctx, cfg);
 			return;
@@ -238,19 +242,23 @@ export default function (pi: ExtensionAPI) {
 
 		const full = pi.getActiveTools();
 		let target: string[];
+		let mode: TaskMode = "weak";
 		let routed = false;
 		if (cfg.bootstrapMode === "zero") {
 			target = [];
 		} else {
-			const taskText = taskTextFromEntries(branch);
-			// Task routing needs the first durable user message. When it is
-			// not durable yet, fall back to the configured bootstrap set
-			// instead of exposing the full catalog.
+			// `before_agent_start` carries the submitted prompt; session_start
+			// has none, so task routing sessions defer to before_agent_start.
+			const taskText = prompt?.trim()
+				? prompt
+				: taskTextFromEntries(branch);
+			mode = classifyTask(taskText);
+			// Task routing needs real task text. Without it, fall back to the
+			// configured bootstrap set instead of exposing the full catalog.
 			const routingCfg =
 				cfg.taskRouting && taskText.trim()
 					? cfg
 					: { ...cfg, taskRouting: false };
-			const mode = classifyTask(taskText);
 			const resolved = selectBootstrapTools(routingCfg, mode, full);
 			if (resolved.missing.length > 0) {
 				// Configuration error — fail safe, never strip tools silently.
@@ -271,9 +279,7 @@ export default function (pi: ExtensionAPI) {
 				(cfg.bootstrapMode === "zero"
 					? "0 tools (zero-tool anchor)"
 					: `${target.length}/${full.length} tools (${target.join(", ")})` +
-						(routed
-							? ` [task-routing ${taskModeFor(branch)}]`
-							: "")),
+						(routed ? ` [task-routing ${mode}]` : "")),
 		);
 	};
 
@@ -316,14 +322,15 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("before_agent_start", async (event, ctx) => {
 		const cfg = loadConfig(ctx, logger);
-		await ensureNarrowed(ctx, cfg);
+		await ensureNarrowed(ctx, cfg, event.prompt);
 		// The DSH persona replaces the whole system prompt permanently (only
 		// the tool catalog promotes). Task routing picks the measured optimum
 		// persona for the classified task; otherwise the minimal persona is
 		// used for every target model.
 		if (cfg.minimalSystemPrompt && isTarget(ctx.model, cfg)) {
-			const branch = ctx.sessionManager.getBranch();
-			const taskText = taskTextFromEntries(branch);
+			const taskText = event.prompt?.trim()
+				? event.prompt
+				: taskTextFromEntries(ctx.sessionManager.getBranch());
 			const persona =
 				cfg.taskRouting &&
 				cfg.bootstrapMode === "two-tool" &&

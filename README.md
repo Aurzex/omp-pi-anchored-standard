@@ -108,7 +108,7 @@ pi install omp-pi-anchored-standard
 或把仓库加进 `~/.pi/agent/settings.json` 的 `packages`,`/reload` 后自动安装:
 
 ```jsonc
-{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.4.0"] }
+{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.4.1"] }
 ```
 
 默认配置即可用(自动锚定 `deepseek-v4-pro`,任务感知路由开启)。如需覆盖,在全局 `~/.pi/agent/settings.json` + 可信项目的 `.pi/settings.json` 配置(语义同上):
@@ -132,7 +132,7 @@ pi install omp-pi-anchored-standard
 
 改完 `/reload`。
 
-> 版本锁:git 安装可用 `@v0.4.0`(pi)/ `#v0.4.0`(omp);npm 安装默认就是 `latest`(`0.4.0`)。
+> 版本锁:git 安装可用 `@v0.4.1`(pi)/ `#v0.4.1`(omp);npm 安装默认就是 `latest`(`0.4.1`)。
 
 ## 验证
 
