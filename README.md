@@ -1,6 +1,6 @@
 # omp-pi-anchored-standard
 
-给 **omp**（Oh My Pi）和 **pi**（pi-coding-agent）使用的 "anchored standard" 插件。核心思路：把目标模型的**第一个请求**锚定到最小工具目录 + DSH 人设，在会话记录到**第一个持久提升信号**后恢复完整工具目录（或可选的 resident 工具集）与正常预算。
+给 **omp**（Oh My Pi）和 **pi**（pi-coding-agent）使用的 "anchored standard" 插件。核心思路：把目标模型的**第一个请求**锚定到最小工具目录 + DSH 人设，在会话记录到**第一个持久提升信号**后恢复 resident 工具集（默认，避免上游实测的 post-promotion 轨迹回退；显式 `promotedTools: []` 可恢复完整工具目录）与正常预算。
 
 **默认零配置可用**：未配置 `anchoredTools` 时自动锚定 `deepseek-v4-pro`，使用纯 anchored-standard 行为（`taskRouting: false`），实测稳定复现 `We need` 风格。任务感知路由（`taskRouting: true`）可选开启，参考 [dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite)。
 
@@ -20,15 +20,15 @@ DeepSeek V4 Pro 对 API 可见的工具目录高度敏感。Project2 评测（De
 宽工具目录对**首请求**有害（高 `let me`、计划退化），但永久停在 Minimal 会丢掉 Standard 的工具集。因此采用两阶段：
 
 1. **第一个模型请求** → 只暴露首轮核心工具（`bootstrapMode: "two-tool"`，默认），或零工具 + 固定 anchor 回合（`bootstrapMode: "zero"`）。
-2. **第一个持久提升信号之后**（按 `promoteOn`）→ 恢复完整目录（默认，能力无损失）；配置 `promotedTools` 后切到上游实测的 post-promotion resident 工具集，避免 25 个工具一次性灌回导致轨迹回退。
+2. **第一个持久提升信号之后**（按 `promoteOn`）→ 默认恢复上游实测的 post-promotion resident 工具集（shell + 常用文件工具），避免 25 个工具一次性灌回导致轨迹回退；显式配置 `promotedTools: []` 可恢复完整目录（能力无损失）。
 
 ## 工作原理
 
 ```text
 第一请求                          持久提升信号后                 compaction 后
 ────────────────────             ────────────────────          ────────────────────
-two-tool: shell + read           完整目录 / promotedTools       bootstrap 工具 + compactionTools
-zero:     空工具 + anchor 回合    完整目录 / promotedTools       空 / shell + compactionTools
+two-tool: shell + read           resident 默认 / 完整目录(显式[])  bootstrap 工具 + compactionTools
+zero:     空工具 + anchor 回合    resident 默认 / 完整目录(显式[])  空 / shell + compactionTools
 ```
 
 - 阶段从**持久会话条目**推导（`getBranch()` / `buildContextEntries()`），`/resume`、`/reload` 自动保留。
@@ -39,7 +39,7 @@ zero:     空工具 + anchor 回合    完整目录 / promotedTools       空 / 
 
 ## 安装
 
-当前版本：`omp-pi-anchored-standard@0.12.0`
+当前版本：`omp-pi-anchored-standard@0.13.0`
 
 ### omp
 
@@ -69,10 +69,10 @@ pi install omp-pi-anchored-standard
 或加入 `~/.pi/agent/settings.json` 的 `packages`：
 
 ```jsonc
-{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.12.0"] }
+{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.13.0"] }
 ```
 
-> 版本锁：git 安装可用 `@v0.12.0`（pi）/ `#v0.12.0`（omp）；npm 安装默认 `latest`（`0.12.0`）。
+> 版本锁：git 安装可用 `@v0.13.0`（pi）/ `#v0.13.0`（omp）；npm 安装默认 `latest`（`0.13.0`）。
 
 ## 配置
 
@@ -91,7 +91,7 @@ pi install omp-pi-anchored-standard
 | `routerMode`               | `"standard" \| "spec"` / `"standard"`                         | `taskRouting: true` 时生效；standard=RL 接口还原，spec=深度思考优先                  |
 | `suppressedContextSources` | `string[]` / `["skill-catalog", "agent-instructions"]`        | 首请求剥离的自动注入上下文；`[]` 关闭剥离                                            |
 | `compactionTools`          | `string[]` / `[]`                                             | compaction 后、重新提升前的工作集                                                    |
-| `promotedTools`            | `string[]` / `[]`                                             | 提升后 resident 工具集；`[]` = 恢复完整目录                                          |
+| `promotedTools`            | `string[]` / `["bash", "read", "edit", "glob", "grep"]`       | 提升后 resident 工具集（默认，对齐上游 post-promotion）；`[]` = 恢复完整目录         |
 | `includeSubagents`         | `boolean` / `false`                                           | `true` 时子代理也走 bootstrap/anchor 阶段；omp 生效                                  |
 | `anchorText`               | `string` / `This round is a test. ...`                        | zero 模式 anchor 文本                                                                |
 | `notify`                   | `boolean` / `true`                                            | 提升时一次性 TUI 通知                                                                |
@@ -117,7 +117,12 @@ anchoredTools:
         - skill-catalog
         - agent-instructions
     compactionTools: []
-    promotedTools: []
+    promotedTools:
+        - bash
+        - read
+        - edit
+        - glob
+        - grep
     includeSubagents: false
     notify: true
 ```
@@ -142,7 +147,7 @@ anchoredTools:
 		"anchorText": "This round is a test. Tools are not open yet; all tools will open next round.",
 		"suppressedContextSources": ["skill-catalog", "agent-instructions"],
 		"compactionTools": [],
-		"promotedTools": [],
+		"promotedTools": ["bash", "read", "edit", "glob", "grep"],
 		"includeSubagents": false,
 		"notify": true,
 	},
@@ -190,9 +195,9 @@ anchoredTools:
 
 ### `promotedTools`
 
-- 默认 `[]`：提升后恢复完整目录。
-- 非空：提升后只保留指定工具（如 `["bash", "read", "edit", "glob", "grep"]`），复刻上游 post-promotion resident 行为。
-- `bash`/`pwsh` 按平台 shell 归一化；缺失时 fail-safe 保持完整目录。
+- 默认 `["bash", "read", "edit", "glob", "grep"]`：提升后保留 shell + 常用文件工具，对齐上游 post-promotion resident 行为，避免完整目录一次性灌回导致的轨迹回退。
+- 显式 `[]`：提升后恢复完整目录（保留原插件“能力无损失”的选项）。
+- 非空自定义：提升后只保留指定工具；`bash`/`pwsh` 按平台 shell 归一化；缺失时 fail-safe 保持完整目录。
 
 ### `includeSubagents`
 
@@ -247,6 +252,12 @@ test/
 ```
 
 ## 更新记录
+
+### 0.13.0
+
+- 对齐上游 `dsh-anchored-standard` 最新 post-promotion resident 行为：`promotedTools` 默认从 `[]`（完整目录）改为 `["bash", "read", "edit", "glob", "grep"]`（shell + 常用文件工具）。
+- 显式 `promotedTools: []` 仍恢复完整目录，保留原插件选项；缺失工具时继续 fail-safe 保持完整目录。
+- 文档与测试同步更新。
 
 ### 0.12.0
 
@@ -306,6 +317,7 @@ test/
 - Flash 在 `taskRouting` 下强制 `weak`，并静态并入 w7 深度思考/决策闭环锚。
 - 平台 shell 选择 `pwsh` 优先。
 - `compactionTools` / compaction epoch 移植自 `compaction-epoch.mjs`。
+- `promotedTools` 默认 resident 集，对应上游 post-promotion resident 行为；显式 `[]` 保留完整目录。
 - zero 模式与 `suppressedContextSources` 对应 zero-anchored-standard / whoami-standard。
 
 ## License

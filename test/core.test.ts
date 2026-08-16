@@ -10,6 +10,7 @@ import {
 	classifyTask,
 	countTrajectory,
 	deepMerge,
+	DEFAULT_PROMOTED_TOOLS,
 	extractRaw,
 	filterTools,
 	hasAssistantMessage,
@@ -668,7 +669,7 @@ describe("applyDefaults", () => {
 		suppressedContextSources: ["skill-catalog", "agent-instructions"],
 		compactionTools: [],
 		includeSubagents: false,
-		promotedTools: [],
+		promotedTools: [...DEFAULT_PROMOTED_TOOLS],
 	};
 
 	test("empty raw config resolves to DEFAULTS", () => {
@@ -718,7 +719,7 @@ describe("applyDefaults", () => {
 			suppressedContextSources: ["skill-catalog", "agent-instructions"],
 			compactionTools: [],
 			includeSubagents: false,
-			promotedTools: [],
+			promotedTools: [...DEFAULT_PROMOTED_TOOLS],
 		});
 	});
 	test("invalid bootstrapMode and promoteOn normalize to defaults", () => {
@@ -786,8 +787,14 @@ describe("applyDefaults", () => {
 		);
 	});
 
-	test("promotedTools defaults empty and deduplicates", () => {
-		assert.deepStrictEqual(applyDefaults({}).promotedTools, []);
+	test("promotedTools defaults to resident set; explicit [] preserves full catalog", () => {
+		assert.deepStrictEqual(applyDefaults({}).promotedTools, [
+			...DEFAULT_PROMOTED_TOOLS,
+		]);
+		assert.deepStrictEqual(
+			applyDefaults({ promotedTools: [] }).promotedTools,
+			[],
+		);
 		assert.deepStrictEqual(
 			applyDefaults({
 				promotedTools: ["bash", "read", "read", "edit"],

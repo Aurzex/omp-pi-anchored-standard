@@ -830,13 +830,14 @@ export function selectZeroBootstrapTools(
 
 /**
  * Post-promotion resident tool surface, ported from upstream
- * dsh-anchored-standard's "resident set" change. Empty `promotedTools`
- * preserves the original behavior: restore the full catalog. Non-empty keeps
- * only the listed tools after promotion (plus the platform shell when a
- * `bash`/`pwsh` entry is configured), so heavier tools stay one explicit
- * config change away instead of flooding the post-promotion trajectory.
- * Fails safe: missing tools report `missing` so callers can warn and keep the
- * full catalog.
+ * dsh-anchored-standard's "resident set" change. The default config now uses
+ * a resident set (`DEFAULT_PROMOTED_TOOLS`); an explicitly empty
+ * `promotedTools` preserves the original behavior and restores the full
+ * catalog. Non-empty keeps only the listed tools after promotion (plus the
+ * platform shell when a `bash`/`pwsh` entry is configured), so heavier tools
+ * stay one explicit config change away instead of flooding the
+ * post-promotion trajectory. Fails safe: missing tools report `missing` so
+ * callers can warn and keep the full catalog.
  */
 export function selectPromotedTools(
 	available: string[],
@@ -1135,6 +1136,25 @@ export interface RawConfig {
 /** Fixed anchor text from upstream zero-anchored-standard (config-overridable). */
 export const ANCHOR_TEXT =
 	"This round is a test. Tools are not open yet; all tools will open next round.";
+
+/**
+ * Default post-promotion resident catalog.
+ *
+ * Upstream dsh-anchored-standard keeps the promoted phase on a small resident
+ * set instead of dumping the full Standard catalog at once (measured
+ * post-promotion regression). omp/pi have no DSH discovery tools
+ * (`dev_tool_search`/`skill_search`/`skill_load`), so the portable equivalent
+ * is the platform shell plus the common file-work set. Explicitly configuring
+ * `promotedTools: []` still restores the full catalog.
+ */
+export const DEFAULT_PROMOTED_TOOLS = [
+	"bash",
+	"read",
+	"edit",
+	"glob",
+	"grep",
+] as const;
+
 export const DEFAULTS: Config = {
 	enabled: true,
 	models: ["deepseek-v4-pro"],
@@ -1160,11 +1180,10 @@ export const DEFAULTS: Config = {
 	suppressedContextSources: [...DEFAULT_SUPPRESSED_SOURCES],
 	compactionTools: [],
 	includeSubagents: false,
-	// Empty = restore the full catalog after promotion (the original plugin
-	// promise). Non-empty = upstream's post-promotion resident-set behavior:
-	// keep only these tools (plus the platform shell when `bash`/`pwsh` is
-	// listed) after promotion.
-	promotedTools: [],
+	// Default = upstream's post-promotion resident-set behavior: keep only the
+	// platform shell + common file-work tools after promotion. Explicitly
+	// configured `[]` restores the full catalog (the original plugin promise).
+	promotedTools: [...DEFAULT_PROMOTED_TOOLS],
 };
 
 /**
@@ -1230,8 +1249,10 @@ export function applyDefaults(raw: RawConfig): Config {
 			? [...new Set(raw.compactionTools)]
 			: [],
 		includeSubagents: raw.includeSubagents ?? DEFAULTS.includeSubagents,
-		promotedTools: isNonEmptyStringArray(raw.promotedTools)
-			? [...new Set(raw.promotedTools)]
-			: [],
+		promotedTools: Array.isArray(raw.promotedTools)
+			? isNonEmptyStringArray(raw.promotedTools)
+				? [...new Set(raw.promotedTools)]
+				: []
+			: [...DEFAULTS.promotedTools],
 	};
 }
