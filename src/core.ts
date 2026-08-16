@@ -73,8 +73,10 @@ export function matchGlob(pattern: string, value: string): boolean {
 			.replace(/\*/g, ".*");
 		re = new RegExp(`^${escaped}$`, "i");
 		GLOB_REGEX_CACHE.set(p, re);
-		if (GLOB_REGEX_CACHE.size > GLOB_REGEX_CACHE_MAX)
-			GLOB_REGEX_CACHE.clear();
+		if (GLOB_REGEX_CACHE.size > GLOB_REGEX_CACHE_MAX) {
+			const oldest = GLOB_REGEX_CACHE.keys().next().value;
+			if (oldest !== undefined) GLOB_REGEX_CACHE.delete(oldest);
+		}
 	}
 	return re.test(value);
 }
@@ -523,18 +525,20 @@ export function stripContextMessages(
 ): PayloadMessage[] | undefined {
 	if (!Array.isArray(messages) || messages.length === 0) return undefined;
 	if (suppressedSources.length === 0) return undefined;
-	const hasReply = messages.some((m) => {
+	let userIdx = -1;
+	let hasSourceKind = false;
+	for (let i = 0; i < messages.length; i++) {
+		const m = messages[i];
 		const r = m?.role;
-		return r === "assistant" || r === "toolResult" || r === "tool";
-	});
-	if (hasReply) return undefined;
-	const userIdx = lastUserIndex(messages);
+		if (r === "assistant" || r === "toolResult" || r === "tool") {
+			return undefined;
+		}
+		if (r === "user") userIdx = i;
+		const kind = m?.source?.kind;
+		if (typeof kind === "string" && kind.length > 0) hasSourceKind = true;
+	}
 	if (userIdx < 0) return undefined;
 
-	const hasSourceKind = messages.some((m) => {
-		const kind = m?.source?.kind;
-		return typeof kind === "string" && kind.length > 0;
-	});
 	if (hasSourceKind) {
 		const kept = messages.filter((m) => {
 			const kind = m?.source?.kind;

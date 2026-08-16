@@ -39,7 +39,7 @@ zero:     空工具 + anchor 回合    完整目录 / promotedTools       空 / 
 
 ## 安装
 
-当前版本：`omp-pi-anchored-standard@0.11.1`
+当前版本：`omp-pi-anchored-standard@0.12.0`
 
 ### omp
 
@@ -69,10 +69,10 @@ pi install omp-pi-anchored-standard
 或加入 `~/.pi/agent/settings.json` 的 `packages`：
 
 ```jsonc
-{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.11.1"] }
+{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.12.0"] }
 ```
 
-> 版本锁：git 安装可用 `@v0.11.1`（pi）/ `#v0.11.1`（omp）；npm 安装默认 `latest`（`0.11.1`）。
+> 版本锁：git 安装可用 `@v0.12.0`（pi）/ `#v0.12.0`（omp）；npm 安装默认 `latest`（`0.12.0`）。
 
 ## 配置
 
@@ -247,6 +247,13 @@ test/
 ```
 
 ## 更新记录
+
+### 0.12.0
+
+- 性能：新增 omp/pi 配置文件按 mtime/size 缓存，避免每次 hook 重复读盘解析。
+- 性能：关闭 `taskRouting` 时不再扫描会话/消息做任务分类；glob 正则缓存改为逐条淘汰而不是整表清空。
+- 交互：pi 的 `/anchored-tools` 现在与 omp 一致显示实际生效的 bootstrap 工具集及来源（`router` / `configured`）。
+- 逻辑：`stripContextMessages` 改为单次遍历并提前返回，保持原语义。
 
 ### 0.11.1
 

@@ -60,7 +60,7 @@
  * YAML settings. No other runtime dependencies.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
@@ -104,6 +104,10 @@ import {
 const EXT_NAME = "anchored-tools";
 const OMP_CONFIG_DIR = ".omp";
 const CONFIG_FILENAMES = ["config.yml", "config.yaml"];
+const CONFIG_CACHE: Record<
+	string,
+	{ mtimeMs: number; size: number; data: Record<string, unknown> | undefined }
+> = Object.create(null);
 
 /** First existing config file in `dir` (config.yaml is the official compat name). */
 function configCandidates(dir: string): string | undefined {
@@ -119,15 +123,27 @@ function readConfigYaml(
 	path: string | undefined,
 ): Record<string, unknown> | undefined {
 	if (!path || !existsSync(path)) return undefined;
+	const stat = statSync(path);
+	const cached = CONFIG_CACHE[path];
+	if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size)
+		return cached.data;
+	let data: Record<string, unknown> | undefined;
 	try {
 		const parsed = Bun.YAML.parse(readFileSync(path, "utf8")) as unknown;
-		return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-			? (parsed as Record<string, unknown>)
-			: undefined;
+		data =
+			parsed && typeof parsed === "object" && !Array.isArray(parsed)
+				? (parsed as Record<string, unknown>)
+				: undefined;
 	} catch (err) {
 		logger.warn(`[${EXT_NAME}] failed to parse ${path}: ${err}; ignoring`);
-		return undefined;
+		data = undefined;
 	}
+	CONFIG_CACHE[path] = {
+		mtimeMs: stat.mtimeMs,
+		size: stat.size,
+		data,
+	};
+	return data;
 }
 
 /** Global settings as base; project settings deep-merge over it. */
@@ -239,18 +255,19 @@ export default function (pi: ExtensionAPI) {
 			}
 			target = resolved.tools;
 		} else {
-			// `before_agent_start` carries the submitted prompt; session_start
-			// has none, so task routing sessions defer to before_agent_start.
-			const taskText = prompt?.trim()
-				? prompt
-				: taskTextFromEntries(branch);
-			mode = routeTaskMode(taskText, ctx.model!.id);
-			// Task routing needs real task text. Without it, fall back to the
-			// configured bootstrap set instead of exposing the full catalog.
-			const routingCfg =
-				cfg.taskRouting && taskText.trim()
-					? cfg
-					: { ...cfg, taskRouting: false };
+			let routingCfg = cfg;
+			if (cfg.taskRouting) {
+				// `before_agent_start` carries the submitted prompt; session_start
+				// has none, so task routing sessions defer to before_agent_start.
+				const taskText = prompt?.trim()
+					? prompt
+					: taskTextFromEntries(branch);
+				mode = routeTaskMode(taskText, ctx.model!.id);
+				// Task routing needs real task text. Without it, fall back to the
+				// configured bootstrap set instead of exposing the full catalog.
+				if (!taskText.trim())
+					routingCfg = { ...cfg, taskRouting: false };
+			}
 			const resolved = selectBootstrapTools(
 				routingCfg,
 				mode,
@@ -344,19 +361,22 @@ export default function (pi: ExtensionAPI) {
 		// persona for the classified task; otherwise the minimal persona is
 		// used for every target model.
 		if (cfg.minimalSystemPrompt && isTargetModel(cfg, ctx.model)) {
-			const taskText = event.prompt?.trim()
-				? event.prompt
-				: taskTextFromEntries(ctx.sessionManager.getBranch());
-			const persona =
+			let persona = MINIMAL_SYSTEM_PROMPT;
+			if (
 				cfg.taskRouting &&
 				cfg.bootstrapMode === "two-tool" &&
-				cfg.routerMode === "spec" &&
-				taskText.trim()
-					? routerPersonaFor(
-							routeTaskMode(taskText, ctx.model!.id),
-							ctx.model!.id,
-						)
-					: MINIMAL_SYSTEM_PROMPT;
+				cfg.routerMode === "spec"
+			) {
+				const taskText = event.prompt?.trim()
+					? event.prompt
+					: taskTextFromEntries(ctx.sessionManager.getBranch());
+				if (taskText.trim()) {
+					persona = routerPersonaFor(
+						routeTaskMode(taskText, ctx.model!.id),
+						ctx.model!.id,
+					);
+				}
+			}
 			return { systemPrompt: [persona] };
 		}
 	});

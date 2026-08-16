@@ -47,7 +47,7 @@
  *   }
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
 	CONFIG_DIR_NAME,
@@ -91,18 +91,30 @@ import {
 } from "./core";
 
 const EXT_NAME = "anchored-tools";
+const CONFIG_CACHE: Record<
+	string,
+	{ mtimeMs: number; size: number; data: Record<string, unknown> | undefined }
+> = Object.create(null);
 
 function readSettingsJson(path: string): Record<string, unknown> | undefined {
 	if (!existsSync(path)) return undefined;
+	const stat = statSync(path);
+	const cached = CONFIG_CACHE[path];
+	if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size)
+		return cached.data;
+	let data: Record<string, unknown> | undefined;
 	try {
 		const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
-		return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-			? (parsed as Record<string, unknown>)
-			: undefined;
+		data =
+			parsed && typeof parsed === "object" && !Array.isArray(parsed)
+				? (parsed as Record<string, unknown>)
+				: undefined;
 	} catch (err) {
 		console.warn(`[${EXT_NAME}] failed to parse ${path}: ${err}; ignoring`);
-		return undefined;
+		data = undefined;
 	}
+	CONFIG_CACHE[path] = { mtimeMs: stat.mtimeMs, size: stat.size, data };
+	return data;
 }
 
 /** Global settings as base; trusted project settings deep-merge over it. */
@@ -187,10 +199,16 @@ export default function (pi: ExtensionAPI) {
 
 		const payloadMessages =
 			(payload.messages as PayloadMessage[] | undefined) ?? [];
-		const taskMode = routeTaskMode(
-			taskTextFromMessages(payloadMessages),
-			ctx.model!.id,
-		);
+		const needsTaskMode =
+			cfg.taskRouting &&
+			(cfg.bootstrapMode === "two-tool" ||
+				(cfg.minimalSystemPrompt && cfg.routerMode === "spec"));
+		const taskMode = needsTaskMode
+			? routeTaskMode(
+					taskTextFromMessages(payloadMessages),
+					ctx.model!.id,
+				)
+			: "weak";
 
 		// Apply the optional first-request output-budget cap (and strip it
 		// after promotion) before any mode-specific branch. This keeps
@@ -432,6 +450,15 @@ export default function (pi: ExtensionAPI) {
 				taskTextFromEntries(entries),
 				model?.id ?? "",
 			);
+			const selected =
+				cfg.bootstrapMode === "two-tool"
+					? selectBootstrapTools(
+							cfg,
+							taskMode,
+							pi.getActiveTools(),
+							promotion.boundary,
+						)
+					: undefined;
 			const status = !cfg.enabled
 				? "disabled"
 				: !matched
@@ -444,7 +471,7 @@ export default function (pi: ExtensionAPI) {
 							? promotion.boundary >= 0
 								? "bootstrap (post-compaction zero-tool)"
 								: "bootstrap (zero-tool anchor)"
-							: `bootstrap (${cfg.bootstrapTools.join(", ")} only)`;
+							: `bootstrap (${selected?.tools.join(", ") ?? cfg.bootstrapTools.join(", ")} only)`;
 			const sid = ctx.sessionManager.getSessionId();
 			const traj = sid ? trajectory.get(sid) : undefined;
 			const lines = [
@@ -453,7 +480,7 @@ export default function (pi: ExtensionAPI) {
 				`promote on: ${cfg.promoteOn}`,
 				`target models: ${cfg.models.join(", ") || "(none — no model is anchored)"}`,
 				`task routing: ${cfg.taskRouting ? `on (routerMode=${cfg.routerMode}, task=${taskMode})` : "off"}`,
-				`bootstrap tools: ${cfg.bootstrapTools.join(", ")}`,
+				`bootstrap tools: ${selected ? `${selected.tools.join(", ")} (${selected.used})` : cfg.bootstrapTools.join(", ")}`,
 				`compaction tools: ${cfg.compactionTools.join(", ") || "(none)"}`,
 				`promoted tools: ${cfg.promotedTools.join(", ") || "(full catalog)"}`,
 				`bootstrap max tokens: ${cfg.bootstrapMaxTokens ?? "off (default)"}`,
