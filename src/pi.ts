@@ -35,6 +35,7 @@
  *       "enabled": true,
  *       "models": ["deepseek-v4-pro"],       // glob patterns; "provider/modelId" or bare modelId
  *       "bootstrapTools": ["bash", "read"],  // two-tool mode only (default)
+ *       "routerMode": "standard",            // "standard" | "spec" (taskRouting=true 时生效)
  *       "bootstrapMode": "two-tool",         // "two-tool" | "zero"
  *       "promoteOn": "either",               // "tool-call" | "assistant-message" | "either"
  *       "minimalSystemPrompt": true,         // system prompt → DSH minimal persona (permanent)
@@ -210,7 +211,9 @@ export default function (pi: ExtensionAPI) {
 		// used for every target model.
 		if (cfg.minimalSystemPrompt) {
 			const persona =
-				cfg.taskRouting && cfg.bootstrapMode === "two-tool"
+				cfg.taskRouting &&
+				cfg.bootstrapMode === "two-tool" &&
+				cfg.routerMode === "spec"
 					? routerPersonaFor(taskMode, ctx.model!.id)
 					: MINIMAL_SYSTEM_PROMPT;
 			const sp = rewriteSystemPrompt(payload, persona);
@@ -221,7 +224,9 @@ export default function (pi: ExtensionAPI) {
 					spLogged.add(sid);
 					console.log(
 						`[${EXT_NAME}] ${ctx.model!.provider}/${ctx.model!.id}: system prompt → ` +
-							(cfg.taskRouting && cfg.bootstrapMode === "two-tool"
+							(cfg.taskRouting &&
+							cfg.bootstrapMode === "two-tool" &&
+							cfg.routerMode === "spec"
 								? `route persona (${taskMode})`
 								: "DSH minimal persona"),
 					);
@@ -447,7 +452,7 @@ export default function (pi: ExtensionAPI) {
 				`mode: ${cfg.bootstrapMode}`,
 				`promote on: ${cfg.promoteOn}`,
 				`target models: ${cfg.models.join(", ") || "(none — no model is anchored)"}`,
-				`task routing: ${cfg.taskRouting ? `on (task=${taskMode})` : "off"}`,
+				`task routing: ${cfg.taskRouting ? `on (routerMode=${cfg.routerMode}, task=${taskMode})` : "off"}`,
 				`bootstrap tools: ${cfg.bootstrapTools.join(", ")}`,
 				`compaction tools: ${cfg.compactionTools.join(", ") || "(none)"}`,
 				`promoted tools: ${cfg.promotedTools.join(", ") || "(full catalog)"}`,

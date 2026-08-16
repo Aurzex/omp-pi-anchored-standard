@@ -35,7 +35,7 @@ DeepSeek V4 Pro 对 API 可见的工具目录高度敏感。Project2 评测(Deep
 - **`bootstrapMaxTokens`(默认不封顶,仅 pi)**:可选的首请求输出预算封顶。上游 issue #11 实测:Minimal 工具 schema 在适配器默认 maxTokens(256000)下**无需封顶**即可锚定 `We need` 轨迹(5/5),而封顶的送达依赖 profile package 的 `prepareCall` 行为(rc.5 源码可达请求,rc.6 预构建包会被 `adapterDefaults.maxTokens` 覆盖)。故默认不封顶(opt-in);配置后才封顶,提升后剥离注入的上限。omp 无原生 max-token 控制且 `before_provider_request` 返回值被 openai-completions 传输层丢弃,故此配置在 omp 侧仅做校验、不生效。
 - **`promotedTools`(默认 `[]`,即恢复完整目录)**:上游 dsh-anchored-standard 最新版在提升后不再一次性灌回完整 Standard 目录,而是收窄到 resident 集(默认 `bash`+`str_replace_editor` + 发现工具 + 已解锁工具),避免 post-promotion 回归。omp/pi 默认保留"完整目录"承诺;若想复刻上游 resident 行为,配置 `promotedTools` 为提升后常驻的工具名(如 `["bash", "read", "edit", "glob", "grep"]`)。`bash`/`pwsh` 条目同样按平台 shell 归一化;缺失时 fail-safe 保持完整目录。
 - **`includeSubagents`(默认 `false`)**:上游 `compaction-epoch.mjs` 默认子代理(`delegationDepth > 0`)直接视为已提升,`includeSubagents: true` 才让子代理也走 bootstrap/anchor 阶段。omp 用 `session_init` 识别子代理;pi 会话模型没有该条目,此选项主要对 omp 生效。
-- **`taskRouting`(默认 `false`,仅 `two-tool` 模式)**:参考 [dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite) / dsh-router-standard 的实测路由。首轮前从会话第一条用户消息分类任务:`react`(新建/开发)→ doer persona + 写优先工具(`read`/`write`/`edit`);`spec`(修复/维护)→ DSH minimal persona + 读优先工具(`read`/`edit`/`glob`/`grep`);`weak`(模糊/无关键词)→ 模型自分类 persona(w6c/w7)+ 写优先工具。**Flash 模型一律强制 `weak`**(w7 + 静态深度思考/决策闭环锚,参考 [v4-flash-godmode-opencode-go](https://github.com/SheberDavid/v4-flash-godmode-opencode-go):omp/pi 无 DSH 式 per-message inbox,近场引导必须静态并入 persona)。路由工具缺失时回退到 `bootstrapTools`,再缺失才 fail-safe。默认 `false` 走纯 anchored-standard(固定 DSH minimal persona + `bootstrapTools`),实测稳定复现 `We need` 风格;设 `true` 启用任务感知路由。
+- **`taskRouting`(默认 `false`,仅 `two-tool` 模式)**:参考 [dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite) / dsh-router-standard 的实测路由。首轮前从会话第一条用户消息分类任务:`react`(新建/开发)→ doer persona + 写优先工具(`read`/`write`/`edit`);`spec`(修复/维护)→ DSH minimal persona + 读优先工具(`read`/`edit`/`glob`/`grep`);`weak`(模糊/无关键词)→ 模型自分类 persona(w6c/w7)+ 写优先工具。**Flash 模型一律强制 `weak`**(w7 + 静态深度思考/决策闭环锚,参考 [v4-flash-godmode-opencode-go](https://github.com/SheberDavid/v4-flash-godmode-opencode-go):omp/pi 无 DSH 式 per-message inbox,近场引导必须静态并入 persona)。`routerMode` 默认 `standard`(上游 v0.2.0 新默认):首轮系统只保留 RL 训练句,工具面为 shell + `str_replace_editor`;`routerMode: "spec"` 才走旧版分类 persona + 读/写/编辑工具面。路由工具缺失时回退到 `bootstrapTools`,再缺失才 fail-safe。默认 `taskRouting: false` 走纯 anchored-standard(固定 DSH minimal persona + `bootstrapTools`),实测稳定复现 `We need` 风格;设 `true` 启用任务感知路由。
 - **`suppressedContextSources`(默认 `["skill-catalog", "agent-instructions"]`)**:首请求剥离自动注入的 AGENTS.md / skill-catalog / workspace 摘要——上游 issue #11 的 omp/pi 移植。消息携带 `source.kind` 时按来源精确过滤;omp/pi 消息无 `source.kind`,故按「只保留 system + last user」重建。显式配置 `[]` 关闭剥离而保留工具锚定。含 assistant/toolResult 的多轮历史不重建。
 
 上游新增的实验对比模式:首请求**零工具** + 一条固定 anchor 用户消息(默认 `This round is a test. Tools are not open yet; all tools will open next round.`,可配置;上游 whoami-standard 的 `你是谁` 也可通过 `anchorText` 配置),让第一条推理链走零注入轨迹;anchor 回复落库后恢复完整目录(默认)或 `promotedTools` resident 集。本插件的移植:
@@ -54,12 +54,12 @@ src/
   omp.ts    # omp 入口:setActiveTools 收窄/恢复 + context 注入 anchor + before_agent_start 替换 systemPrompt + config.yml(YAML)
   pi.ts     # pi 入口:before_provider_request + buildContextEntries() + settings.json
 test/
-  core.test.ts   # node:test 单测(133 例)
+  core.test.ts   # node:test 单测(136 例)
 ```
 
 ## 安装
 
-已发布到 npm(`omp-pi-anchored-standard@0.10.0`)。仓库的 `package.json` 也声明了两个宿主的入口(`omp.extensions` / `pi.extensions`),npm 与 git 安装都会自动加载正确入口。
+已发布到 npm(`omp-pi-anchored-standard@0.11.0`)。仓库的 `package.json` 也声明了两个宿主的入口(`omp.extensions` / `pi.extensions`),npm 与 git 安装都会自动加载正确入口。
 
 ### omp
 
@@ -94,6 +94,8 @@ anchoredTools:
         - bash
         - read # 默认 shell+read;目录存在 str_replace_editor 时可显式改为 [bash, str_replace_editor]
     promoteOn: either # "tool-call" | "assistant-message" | "either"(默认对齐上游最新)
+    taskRouting: false # 任务感知路由;开启后 routerMode 生效
+    routerMode: standard # "standard" | "spec";standard=RL 接口还原,spec=深度思考优先
     minimalSystemPrompt: true # 系统提示 → DSH/route persona(永久)
     suppressedContextSources:
         - skill-catalog
@@ -117,7 +119,7 @@ pi install omp-pi-anchored-standard
 或把仓库加进 `~/.pi/agent/settings.json` 的 `packages`,`/reload` 后自动安装:
 
 ```jsonc
-{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.10.0"] }
+{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.11.0"] }
 ```
 
 默认配置即可用(自动锚定 `deepseek-v4-pro`,纯 anchored-standard;`taskRouting` 默认关闭)。如需覆盖,在全局 `~/.pi/agent/settings.json` + 可信项目的 `.pi/settings.json` 配置(语义同上):
@@ -132,6 +134,7 @@ pi install omp-pi-anchored-standard
 		"promoteOn": "either",
 		"minimalSystemPrompt": true,
 		"taskRouting": false,
+		"routerMode": "standard",
 		"anchorText": "This round is a test. Tools are not open yet; all tools will open next round.",
 		"suppressedContextSources": ["skill-catalog", "agent-instructions"],
 		"compactionTools": [],
@@ -144,7 +147,7 @@ pi install omp-pi-anchored-standard
 
 改完 `/reload`。
 
-> 版本锁:git 安装可用 `@v0.10.0`(pi)/ `#v0.10.0`(omp);npm 安装默认就是 `latest`(`0.10.0`)。
+> 版本锁:git 安装可用 `@v0.11.0`(pi)/ `#v0.11.0`(omp);npm 安装默认就是 `latest`(`0.11.0`)。
 
 ## 验证
 
@@ -169,6 +172,15 @@ npm test            # node --test(原生 TS,无需 bun;bun 环境同样可跑 no
 ```
 
 ## 更新记录
+
+### 0.11.0
+
+- 对齐 `dsh-router-standard` v0.2.0/v0.2.1:
+    - 新增 `routerMode`(`standard` 默认 / `spec`)。
+    - `standard`:首轮 RL 接口还原——系统只保留 DSH minimal 人设,工具面为 shell + `str_replace_editor`。
+    - `spec`:旧版任务分类 persona + 读/写/编辑工具面。
+- omp/pi 双入口的 `taskRouting` 均支持 `routerMode`;`/anchored-tools` 显示当前 `routerMode`。
+- 文档与测试同步更新(`136` 例)。
 
 ### 0.10.0
 
@@ -201,6 +213,7 @@ npm test            # node --test(原生 TS,无需 bun;bun 环境同样可跑 no
 
 - `bootstrapTools` 默认 `["bash", "read"]`:modeltest 的 98/99 分 anchored-standard 冻结快照首轮就是 `shell + read`;omp/pi 用宿主等价的 `bash`/`pwsh` + `read`,并在目录中存在 `str_replace_editor` 时允许显式切换回 Minimal 精确 schema。
 - `taskRouting` 下 Flash 一律 `weak` 并静态并入 w7 深度思考/决策闭环锚(v4-flash-godmode 对 opencode-go 的适配;omp/pi 同样无 DSH 式 per-message inbox,动态近场引导不可用)。
+- `routerMode`(`standard`/`spec`)移植自 dsh-router-standard v0.2.0:`standard` 默认 RL 接口还原(shell+`str_replace_editor`),`spec` 保留旧版分类 persona + 读/写/编辑工具面。
 - 平台 shell 选择 `pwsh` 优先(dsh-router-standard router-bootstrap)。
 - `compactionTools` / compaction epoch 移植自 dsh-anchored-standard `compaction-epoch.mjs`(compaction 后作为「第二个首请求」重新锚定)。
 - `promoteOn` 默认 `either`、`promotedTools` resident 集与 `includeSubagents` 均对齐 dsh-anchored-standard 最新版(后两者为可选;默认仍恢复完整目录、默认豁免子代理)。

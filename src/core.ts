@@ -741,6 +741,7 @@ export function selectBootstrapTools(
 	cfg: {
 		bootstrapTools: string[];
 		taskRouting: boolean;
+		routerMode?: RouterMode;
 		compactionTools?: string[];
 	},
 	mode: TaskMode,
@@ -754,8 +755,13 @@ export function selectBootstrapTools(
 		used: "router" | "configured";
 	} => {
 		if (cfg.taskRouting) {
+			// `standard` (upstream v0.2.0 default): RL-interface restore —
+			// shell + str_replace_editor. `spec`: old deep-think-first
+			// classification core.
 			const desired = withPlatformShell(
-				routerBootstrapTools(mode),
+				cfg.routerMode === "spec"
+					? routerBootstrapTools(mode)
+					: ["str_replace_editor"],
 				available,
 			);
 			const routerResolved = resolveBootstrap(available, desired);
@@ -932,6 +938,12 @@ export function isBootstrapMode(value: unknown): value is BootstrapMode {
 	return value === "two-tool" || value === "zero";
 }
 
+export type RouterMode = "standard" | "spec";
+
+export function isRouterMode(value: unknown): value is RouterMode {
+	return value === "standard" || value === "spec";
+}
+
 /** True for a positive safe integer (bootstrapMaxTokens validation). */
 export function isPositiveInt(value: unknown): value is number {
 	return (
@@ -950,6 +962,7 @@ export interface Config {
 	minimalSystemPrompt: boolean;
 	bootstrapMaxTokens: number | undefined;
 	taskRouting: boolean;
+	routerMode: RouterMode;
 	suppressedContextSources: string[];
 	compactionTools: string[];
 	includeSubagents: boolean;
@@ -1006,6 +1019,7 @@ export const ALLOWED_RAW_KEYS = [
 	"minimalSystemPrompt",
 	"bootstrapMaxTokens",
 	"taskRouting",
+	"routerMode",
 	"suppressedContextSources",
 	"compactionTools",
 	"includeSubagents",
@@ -1047,6 +1061,11 @@ export function validateRawConfig(
 	if (raw.promoteOn !== undefined && !isPromoteOn(raw.promoteOn)) {
 		warn(
 			`[${extName}] invalid promoteOn ${JSON.stringify(raw.promoteOn)}; using "either"`,
+		);
+	}
+	if (raw.routerMode !== undefined && !isRouterMode(raw.routerMode)) {
+		warn(
+			`[${extName}] invalid routerMode ${JSON.stringify(raw.routerMode)}; using "standard"`,
 		);
 	}
 	if (
@@ -1102,6 +1121,7 @@ export interface RawConfig {
 	minimalSystemPrompt?: boolean;
 	bootstrapMaxTokens?: number;
 	taskRouting?: boolean;
+	routerMode?: unknown;
 	suppressedContextSources?: string[];
 	compactionTools?: string[];
 	includeSubagents?: boolean;
@@ -1129,6 +1149,10 @@ export const DEFAULTS: Config = {
 	minimalSystemPrompt: true,
 	bootstrapMaxTokens: undefined,
 	taskRouting: false,
+	// Upstream dsh-router-standard v0.2.0: `standard` = RL-interface restore
+	// (minimal persona + shell/str_replace_editor first turn), `spec` = old
+	// deep-think-first classification personas + read/write/edit core.
+	routerMode: "standard",
 	suppressedContextSources: [...DEFAULT_SUPPRESSED_SOURCES],
 	compactionTools: [],
 	includeSubagents: false,
@@ -1185,6 +1209,9 @@ export function applyDefaults(raw: RawConfig): Config {
 			? raw.bootstrapMaxTokens
 			: undefined,
 		taskRouting: raw.taskRouting ?? DEFAULTS.taskRouting,
+		routerMode: isRouterMode(raw.routerMode)
+			? raw.routerMode
+			: DEFAULTS.routerMode,
 		suppressedContextSources: Array.isArray(raw.suppressedContextSources)
 			? [
 					...new Set(

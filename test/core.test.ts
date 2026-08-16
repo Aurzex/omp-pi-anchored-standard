@@ -17,6 +17,7 @@ import {
 	isFlashModel,
 	isPositiveInt,
 	isPromoted,
+	isRouterMode,
 	isSubagentSession,
 	isTargetModel,
 	lastUserIndex,
@@ -663,6 +664,7 @@ describe("applyDefaults", () => {
 		minimalSystemPrompt: true,
 		bootstrapMaxTokens: undefined,
 		taskRouting: false,
+		routerMode: "standard",
 		suppressedContextSources: ["skill-catalog", "agent-instructions"],
 		compactionTools: [],
 		includeSubagents: false,
@@ -712,6 +714,7 @@ describe("applyDefaults", () => {
 			minimalSystemPrompt: false,
 			bootstrapMaxTokens: 4096,
 			taskRouting: false,
+			routerMode: "standard",
 			suppressedContextSources: ["skill-catalog", "agent-instructions"],
 			compactionTools: [],
 			includeSubagents: false,
@@ -791,6 +794,22 @@ describe("applyDefaults", () => {
 			}).promotedTools,
 			["bash", "read", "edit"],
 		);
+	});
+
+	test("routerMode defaults standard and accepts spec", () => {
+		assert.equal(applyDefaults({}).routerMode, "standard");
+		assert.equal(applyDefaults({ routerMode: "spec" }).routerMode, "spec");
+		assert.equal(
+			applyDefaults({ routerMode: "invalid" as unknown as "spec" })
+				.routerMode,
+			"standard",
+		);
+	});
+
+	test("isRouterMode narrows valid values", () => {
+		assert.equal(isRouterMode("standard"), true);
+		assert.equal(isRouterMode("spec"), true);
+		assert.equal(isRouterMode("other"), false);
 	});
 });
 
@@ -876,7 +895,11 @@ describe("task routing helpers", () => {
 
 	test("selectBootstrapTools: task routing adds the platform shell", () => {
 		const selected = selectBootstrapTools(
-			{ bootstrapTools: ["bash", "read"], taskRouting: true },
+			{
+				bootstrapTools: ["bash", "read"],
+				taskRouting: true,
+				routerMode: "spec",
+			},
 			"spec",
 			["bash", "read", "edit", "glob", "grep", "write"],
 		);
@@ -888,6 +911,21 @@ describe("task routing helpers", () => {
 			"grep",
 			"bash",
 		]);
+		assert.deepStrictEqual(selected.missing, []);
+	});
+
+	test("selectBootstrapTools: standard routerMode uses RL shell+editor surface", () => {
+		const selected = selectBootstrapTools(
+			{
+				bootstrapTools: ["bash", "read"],
+				taskRouting: true,
+				routerMode: "standard",
+			},
+			"react",
+			["bash", "str_replace_editor", "read", "write", "edit"],
+		);
+		assert.equal(selected.used, "router");
+		assert.deepStrictEqual(selected.tools, ["str_replace_editor", "bash"]);
 		assert.deepStrictEqual(selected.missing, []);
 	});
 

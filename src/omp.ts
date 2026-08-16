@@ -49,6 +49,7 @@
  *     bootstrapTools:
  *       - bash
  *       - read                    # two-tool mode only (default)
+ *     routerMode: standard        # "standard" | "spec" (taskRouting=true 时生效)
  *     bootstrapMode: two-tool     # "two-tool" | "zero"
  *     promoteOn: either           # "tool-call" | "assistant-message" | "either"
  *     notify: true                # one-time TUI notice on promotion
@@ -349,6 +350,7 @@ export default function (pi: ExtensionAPI) {
 			const persona =
 				cfg.taskRouting &&
 				cfg.bootstrapMode === "two-tool" &&
+				cfg.routerMode === "spec" &&
 				taskText.trim()
 					? routerPersonaFor(
 							routeTaskMode(taskText, ctx.model!.id),
@@ -478,7 +480,7 @@ export default function (pi: ExtensionAPI) {
 				`mode: ${cfg.bootstrapMode}`,
 				`promote on: ${cfg.promoteOn}`,
 				`target models: ${cfg.models.join(", ") || "(none — no model is anchored)"}`,
-				`task routing: ${cfg.taskRouting ? `on (task=${taskMode})` : "off"}`,
+				`task routing: ${cfg.taskRouting ? `on (routerMode=${cfg.routerMode}, task=${taskMode})` : "off"}`,
 				`bootstrap tools: ${selected ? `${selected.tools.join(", ")} (${selected.used})` : cfg.bootstrapTools.join(", ")}`,
 				`compaction tools: ${cfg.compactionTools.join(", ") || "(none)"}`,
 				`promoted tools: ${cfg.promotedTools.join(", ") || "(full catalog)"}`,
