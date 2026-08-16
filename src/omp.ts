@@ -80,6 +80,7 @@ import {
 	isSubagentSession,
 	isTargetModel,
 	memoizedIsPromoted,
+	modelConfigFor,
 	memoizedPromotionPhase,
 	MINIMAL_SYSTEM_PROMPT,
 	promoteTrigger,
@@ -93,6 +94,7 @@ import {
 	taskTextFromEntries,
 	trajectoryTextFromMessage,
 	validateRawConfig,
+	type ModelConfig,
 	type Config,
 	type EntryLike,
 	type PayloadMessage,
@@ -181,7 +183,7 @@ export default function (pi: ExtensionAPI) {
 	const maybeNotifyPromoted = (
 		sid: string | undefined,
 		modelId: string,
-		cfg: Config,
+		cfg: ModelConfig,
 		ctx: {
 			ui: {
 				notify(
@@ -207,7 +209,7 @@ export default function (pi: ExtensionAPI) {
 	 */
 	const ensureNarrowed = async (
 		ctx: ExtensionContext,
-		cfg: Config,
+		cfg: ModelConfig,
 		prompt?: string,
 	) => {
 		if (!cfg.enabled || cfg.models.length === 0) {
@@ -306,7 +308,7 @@ export default function (pi: ExtensionAPI) {
 	 * set instead of the full catalog (upstream post-promotion behavior).
 	 * Idempotent per session.
 	 */
-	const ensureRestored = async (ctx: ExtensionContext, cfg: Config) => {
+	const ensureRestored = async (ctx: ExtensionContext, cfg: ModelConfig) => {
 		const sid = ctx.sessionManager.getSessionId();
 		if (!sid || !narrowed.has(sid) || restored.has(sid)) return;
 		const full = fullTools.get(sid);
@@ -349,12 +351,19 @@ export default function (pi: ExtensionAPI) {
 	// routing needs the first user message too, so those sessions defer to
 	// before_agent_start instead of narrowing too early.
 	pi.on("session_start", async (event, ctx) => {
-		const cfg = loadConfig(ctx, logger);
+		const baseCfg = loadConfig(ctx, logger);
+		if (
+			ctx.model === undefined &&
+			Object.keys(baseCfg.modelConfigs).length > 0
+		)
+			return; // defer to before_agent_start until the model is known
+		const cfg = modelConfigFor(baseCfg, ctx.model);
 		if (cfg.taskRouting && cfg.bootstrapMode === "two-tool") return;
 		await ensureNarrowed(ctx, cfg);
 	});
 	pi.on("before_agent_start", async (event, ctx) => {
-		const cfg = loadConfig(ctx, logger);
+		const baseCfg = loadConfig(ctx, logger);
+		const cfg = modelConfigFor(baseCfg, ctx.model);
 		await ensureNarrowed(ctx, cfg, event.prompt);
 		// The DSH persona replaces the whole system prompt permanently (only
 		// the tool catalog promotes). Task routing picks the measured optimum
@@ -385,10 +394,12 @@ export default function (pi: ExtensionAPI) {
 	// tool_call covers the tool-call trigger (fires at arg-prep); message_end
 	// covers the assistant-message/either trigger once the reply is durable.
 	pi.on("tool_call", async (event, ctx) => {
-		await ensureRestored(ctx, loadConfig(ctx, logger));
+		const baseCfg = loadConfig(ctx, logger);
+		await ensureRestored(ctx, modelConfigFor(baseCfg, ctx.model));
 	});
 	pi.on("message_end", async (event, ctx) => {
-		const cfg = loadConfig(ctx, logger);
+		const baseCfg = loadConfig(ctx, logger);
+		const cfg = modelConfigFor(baseCfg, ctx.model);
 		await ensureRestored(ctx, cfg);
 		if (!isTargetModel(cfg, ctx.model)) return;
 		const msg = event.message as
@@ -410,7 +421,8 @@ export default function (pi: ExtensionAPI) {
 	// from the first request. The context event fires before serialization and
 	// is honored by every transport.
 	pi.on("context", (event, ctx) => {
-		const cfg = loadConfig(ctx, logger);
+		const baseCfg = loadConfig(ctx, logger);
+		const cfg = modelConfigFor(baseCfg, ctx.model);
 		if (!cfg.enabled || cfg.models.length === 0) return;
 		const sid = ctx.sessionManager.getSessionId();
 		if (!sid || !narrowed.has(sid) || restored.has(sid)) return;
@@ -462,8 +474,9 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Show anchored tool bootstrap status (model targeting, current phase)",
 		handler: async (_args, ctx) => {
-			const cfg = loadConfig(ctx, logger);
+			const baseCfg = loadConfig(ctx, logger);
 			const model = ctx.model;
+			const cfg = modelConfigFor(baseCfg, model);
 			const matched = isTargetModel(cfg, model);
 			const entries = ctx.sessionManager.getBranch();
 			const promotion = promotionPhase(entries, promoteTrigger(cfg));
@@ -499,7 +512,7 @@ export default function (pi: ExtensionAPI) {
 				`enabled: ${cfg.enabled}`,
 				`mode: ${cfg.bootstrapMode}`,
 				`promote on: ${cfg.promoteOn}`,
-				`target models: ${cfg.models.join(", ") || "(none — no model is anchored)"}`,
+				`target models: ${baseCfg.models.join(", ") || "(none — no model is anchored)"}`,
 				`task routing: ${cfg.taskRouting ? `on (routerMode=${cfg.routerMode}, task=${taskMode})` : "off"}`,
 				`bootstrap tools: ${selected ? `${selected.tools.join(", ")} (${selected.used})` : cfg.bootstrapTools.join(", ")}`,
 				`compaction tools: ${cfg.compactionTools.join(", ") || "(none)"}`,

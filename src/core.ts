@@ -967,7 +967,7 @@ export function isPositiveInt(value: unknown): value is number {
 	);
 }
 
-export interface Config {
+export interface ModelConfig {
 	enabled: boolean;
 	models: string[];
 	bootstrapTools: string[];
@@ -985,6 +985,11 @@ export interface Config {
 	promotedTools: string[];
 }
 
+/** Full config: shared base defaults plus per-model profile overrides. */
+export interface Config extends ModelConfig {
+	modelConfigs: Record<string, ModelConfig>;
+}
+
 /**
  * True when a currently narrowed omp session must be restored to the full
  * catalog even without a promotion signal: anchoring was disabled, the target
@@ -993,7 +998,7 @@ export interface Config {
  * next hook with a model makes the decision.
  */
 export function shouldRestoreFullCatalog(
-	cfg: Config,
+	cfg: ModelConfig,
 	model: { id: string; provider: string } | undefined,
 ): boolean {
 	if (!cfg.enabled || cfg.models.length === 0) return true;
@@ -1003,7 +1008,7 @@ export function shouldRestoreFullCatalog(
 
 /** True when `model` is a target for anchoring under `cfg`. */
 export function isTargetModel(
-	cfg: Config,
+	cfg: ModelConfig,
 	model: { id: string; provider: string } | undefined,
 ): boolean {
 	return (
@@ -1014,11 +1019,28 @@ export function isTargetModel(
 }
 
 /**
+ * Effective config for a concrete model: the first `modelConfigs` pattern
+ * matching `provider/modelId` wins; otherwise the shared base config applies.
+ */
+export function modelConfigFor(
+	cfg: Config,
+	model: { id: string; provider: string } | undefined,
+): ModelConfig {
+	if (model) {
+		for (const [pattern, profile] of Object.entries(cfg.modelConfigs)) {
+			if (modelMatches(model.id, model.provider, [pattern]))
+				return profile;
+		}
+	}
+	return cfg;
+}
+
+/**
  * Effective promotion trigger for a config. Zero-mode always promotes on the
  * first assistant message (the anchor reply), regardless of `promoteOn`.
  */
 export function promoteTrigger(
-	cfg: Pick<Config, "bootstrapMode" | "promoteOn">,
+	cfg: Pick<ModelConfig, "bootstrapMode" | "promoteOn">,
 ): PromoteOn {
 	return cfg.bootstrapMode === "zero" ? "assistant-message" : cfg.promoteOn;
 }
@@ -1040,6 +1062,7 @@ export const ALLOWED_RAW_KEYS = [
 	"compactionTools",
 	"includeSubagents",
 	"promotedTools",
+	"modelConfigs",
 ] as const;
 
 function isNonEmptyStringArray(value: unknown): value is string[] {
@@ -1123,6 +1146,37 @@ export function validateRawConfig(
 			`[${extName}] invalid promotedTools ${JSON.stringify(raw.promotedTools)}; using full catalog after promotion (default)`,
 		);
 	}
+	if (
+		raw.modelConfigs !== undefined &&
+		(typeof raw.modelConfigs !== "object" ||
+			raw.modelConfigs === null ||
+			Array.isArray(raw.modelConfigs))
+	) {
+		warn(
+			`[${extName}] invalid modelConfigs ${JSON.stringify(raw.modelConfigs)}; using shared config for all models`,
+		);
+	} else if (raw.modelConfigs !== undefined) {
+		for (const [pattern, profile] of Object.entries(raw.modelConfigs)) {
+			const label = `${extName} modelConfigs[${pattern}]`;
+			if (pattern.length === 0) {
+				warn(
+					`[${extName}] modelConfigs key must be a non-empty model glob; entry ignored`,
+				);
+				continue;
+			}
+			if (
+				!profile ||
+				typeof profile !== "object" ||
+				Array.isArray(profile)
+			) {
+				warn(
+					`[${label}] must be an object; using shared config for this model`,
+				);
+				continue;
+			}
+			validateRawConfig(profile as RawConfig, warn, label);
+		}
+	}
 }
 
 /** Raw `anchoredTools` block as read from the host settings file. */
@@ -1142,6 +1196,7 @@ export interface RawConfig {
 	compactionTools?: string[];
 	includeSubagents?: boolean;
 	promotedTools?: string[];
+	modelConfigs?: Record<string, RawConfig>;
 }
 
 /** Fixed anchor text from upstream zero-anchored-standard (config-overridable). */
@@ -1166,9 +1221,19 @@ export const DEFAULT_PROMOTED_TOOLS = [
 	"grep",
 ] as const;
 
-export const DEFAULTS: Config = {
+/**
+ * Shared base defaults. Zero-config now targets both measured-optimal models:
+ *
+ * - `deepseek-v4-pro`: anchored-standard defaults (xiaobright/dsh-anchored-standard).
+ * - `deepseek-v4-flash`: router-suite flash defaults
+ *   (yjh051108/dsh-routing-suite + SheberDavid/v4-flash-godmode-opencode-go).
+ *
+ * Each model carries its own full config in `modelConfigs` instead of both
+ * sharing one top-level config.
+ */
+const DEFAULT_MODEL_CONFIG: ModelConfig = {
 	enabled: true,
-	models: ["deepseek-v4-pro"],
+	models: ["deepseek-v4-pro", "deepseek-v4-flash"],
 	// The 98/99 anchored-standard runs on xiaobright/modeltest bootstrapped the
 	// first request with the platform shell + read, not an editor; keep that
 	// measured high-score surface as the zero-config default.
@@ -1191,10 +1256,40 @@ export const DEFAULTS: Config = {
 	suppressedContextSources: [...DEFAULT_SUPPRESSED_SOURCES],
 	compactionTools: [],
 	includeSubagents: false,
-	// Default = upstream's post-promotion resident-set behavior: keep only the
-	// platform shell + common file-work tools after promotion. Explicitly
-	// configured `[]` restores the full catalog (the original plugin promise).
+	// Upstream's post-promotion resident-set behavior: keep only the platform
+	// shell + common file-work tools after promotion. Explicitly configured
+	// `[]` restores the full catalog (the original plugin promise).
 	promotedTools: [...DEFAULT_PROMOTED_TOOLS],
+};
+
+/** Pro best config: pure anchored-standard, promote on first durable signal. */
+const PRO_DEFAULT_MODEL_CONFIG: ModelConfig = {
+	...DEFAULT_MODEL_CONFIG,
+	models: ["deepseek-v4-pro"],
+};
+
+/**
+ * Flash best config, ported from the router-suite Flash presets:
+ * task routing always classifies Flash as `weak`, `routerMode: "spec"` gives
+ * the w7 static persona + read/write/edit core, promotion stays on the first
+ * durable tool call, and after promotion the full catalog returns (upstream
+ * router presets do not use the resident-set experiment).
+ */
+const FLASH_DEFAULT_MODEL_CONFIG: ModelConfig = {
+	...DEFAULT_MODEL_CONFIG,
+	models: ["deepseek-v4-flash"],
+	promoteOn: "tool-call",
+	taskRouting: true,
+	routerMode: "spec",
+	promotedTools: [],
+};
+
+export const DEFAULTS: Config = {
+	...DEFAULT_MODEL_CONFIG,
+	modelConfigs: {
+		"deepseek-v4-pro": PRO_DEFAULT_MODEL_CONFIG,
+		"deepseek-v4-flash": FLASH_DEFAULT_MODEL_CONFIG,
+	},
 };
 
 /**
@@ -1210,42 +1305,37 @@ export function extractRaw(
 		: {};
 }
 
-/**
- * Apply defaults to a raw config. Arrays are deduplicated; an empty
- * `bootstrapTools` array falls back to the default (a configured empty list
- * would otherwise strip every tool on the first request). Invalid
- * `bootstrapMode`/`promoteOn` values normalize to their defaults.
- */
-export function applyDefaults(raw: RawConfig): Config {
+/** Apply defaults to a single flat raw config (no `modelConfigs` handling). */
+function applyModelDefaults(raw: RawConfig): ModelConfig {
 	return {
-		enabled: raw.enabled ?? DEFAULTS.enabled,
+		enabled: raw.enabled ?? DEFAULT_MODEL_CONFIG.enabled,
 		models: Array.isArray(raw.models)
 			? [...new Set(raw.models)]
-			: [...DEFAULTS.models],
+			: [...DEFAULT_MODEL_CONFIG.models],
 		bootstrapTools:
 			Array.isArray(raw.bootstrapTools) && raw.bootstrapTools.length > 0
 				? [...new Set(raw.bootstrapTools)]
-				: [...DEFAULTS.bootstrapTools],
-		notify: raw.notify ?? DEFAULTS.notify,
+				: [...DEFAULT_MODEL_CONFIG.bootstrapTools],
+		notify: raw.notify ?? DEFAULT_MODEL_CONFIG.notify,
 		bootstrapMode: isBootstrapMode(raw.bootstrapMode)
 			? raw.bootstrapMode
-			: DEFAULTS.bootstrapMode,
+			: DEFAULT_MODEL_CONFIG.bootstrapMode,
 		promoteOn: isPromoteOn(raw.promoteOn)
 			? raw.promoteOn
-			: DEFAULTS.promoteOn,
+			: DEFAULT_MODEL_CONFIG.promoteOn,
 		anchorText:
 			typeof raw.anchorText === "string" && raw.anchorText.length > 0
 				? raw.anchorText
-				: DEFAULTS.anchorText,
+				: DEFAULT_MODEL_CONFIG.anchorText,
 		minimalSystemPrompt:
-			raw.minimalSystemPrompt ?? DEFAULTS.minimalSystemPrompt,
+			raw.minimalSystemPrompt ?? DEFAULT_MODEL_CONFIG.minimalSystemPrompt,
 		bootstrapMaxTokens: isPositiveInt(raw.bootstrapMaxTokens)
 			? raw.bootstrapMaxTokens
 			: undefined,
-		taskRouting: raw.taskRouting ?? DEFAULTS.taskRouting,
+		taskRouting: raw.taskRouting ?? DEFAULT_MODEL_CONFIG.taskRouting,
 		routerMode: isRouterMode(raw.routerMode)
 			? raw.routerMode
-			: DEFAULTS.routerMode,
+			: DEFAULT_MODEL_CONFIG.routerMode,
 		suppressedContextSources: Array.isArray(raw.suppressedContextSources)
 			? [
 					...new Set(
@@ -1255,15 +1345,69 @@ export function applyDefaults(raw: RawConfig): Config {
 						),
 					),
 				]
-			: [...DEFAULTS.suppressedContextSources],
+			: [...DEFAULT_MODEL_CONFIG.suppressedContextSources],
 		compactionTools: isNonEmptyStringArray(raw.compactionTools)
 			? [...new Set(raw.compactionTools)]
 			: [],
-		includeSubagents: raw.includeSubagents ?? DEFAULTS.includeSubagents,
+		includeSubagents:
+			raw.includeSubagents ?? DEFAULT_MODEL_CONFIG.includeSubagents,
 		promotedTools: Array.isArray(raw.promotedTools)
 			? isNonEmptyStringArray(raw.promotedTools)
 				? [...new Set(raw.promotedTools)]
 				: []
-			: [...DEFAULTS.promotedTools],
+			: [...DEFAULT_MODEL_CONFIG.promotedTools],
 	};
+}
+
+/**
+ * Apply defaults to a raw config. `models` remains an explicit target list;
+ * when it is omitted, `modelConfigs` keys become the target list. Profile
+ * values are merged over the shared base before defaults, so each model can
+ * carry its own full config.
+ */
+export function applyDefaults(raw: RawConfig): Config {
+	const baseRaw: RawConfig = { ...raw };
+	delete baseRaw.modelConfigs;
+	const base = applyModelDefaults(baseRaw);
+
+	const hasModels = Array.isArray(raw.models);
+	const hasModelConfigs = raw.modelConfigs !== undefined;
+
+	let modelConfigs: Record<string, ModelConfig>;
+	if (hasModelConfigs) {
+		modelConfigs = {};
+		const profiles = raw.modelConfigs;
+		if (
+			profiles &&
+			typeof profiles === "object" &&
+			!Array.isArray(profiles)
+		) {
+			for (const [pattern, profile] of Object.entries(profiles)) {
+				if (pattern.length === 0) continue;
+				if (
+					!profile ||
+					typeof profile !== "object" ||
+					Array.isArray(profile)
+				)
+					continue;
+				modelConfigs[pattern] = applyModelDefaults(
+					deepMerge(baseRaw, profile) as RawConfig,
+				);
+			}
+		}
+	} else if (hasModels) {
+		// Explicit legacy target list: one shared config, no built-in profiles.
+		modelConfigs = {};
+	} else {
+		// Zero-config: both models, each with its measured-optimal defaults.
+		modelConfigs = { ...DEFAULTS.modelConfigs };
+	}
+
+	const models = hasModels
+		? [...new Set(raw.models)]
+		: hasModelConfigs && Object.keys(modelConfigs).length > 0
+			? Object.keys(modelConfigs)
+			: base.models;
+
+	return { ...base, models, modelConfigs };
 }

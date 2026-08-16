@@ -2,7 +2,7 @@
 
 给 **omp**（Oh My Pi）和 **pi**（pi-coding-agent）使用的 "anchored standard" 插件。核心思路：把目标模型的**第一个请求**锚定到最小工具目录 + DSH 人设，在会话记录到**第一个持久提升信号**后恢复 resident 工具集（默认，避免上游实测的 post-promotion 轨迹回退；显式 `promotedTools: []` 可恢复完整工具目录）与正常预算。
 
-**默认零配置可用**：未配置 `anchoredTools` 时自动锚定 `deepseek-v4-pro`，使用纯 anchored-standard 行为（`taskRouting: false`），实测稳定复现 `We need` 风格。任务感知路由（`taskRouting: true`）可选开启，参考 [dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite)。
+**默认零配置可用**：未配置 `anchoredTools` 时自动锚定 `deepseek-v4-pro`（纯 anchored-standard）与 `deepseek-v4-flash`（任务感知路由 Flash 最优档），两套配置分别存放在 `modelConfigs`，不再共用同一套。实测稳定复现 `We need` 风格；上游参考 [dsh-anchored-standard](https://github.com/xiaobright/dsh-anchored-standard) 与 [dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite)。
 
 > 这是 prompt 条件化实验补丁，不是正确性保证；底层评测是单一私人评测，不是普适结论。插件无网络请求、无遥测。
 
@@ -39,7 +39,7 @@ zero:     空工具 + anchor 回合    resident 默认 / 完整目录(显式[]) 
 
 ## 安装
 
-当前版本：`omp-pi-anchored-standard@0.13.0`
+当前版本：`omp-pi-anchored-standard@0.14.0`
 
 ### omp
 
@@ -69,32 +69,33 @@ pi install omp-pi-anchored-standard
 或加入 `~/.pi/agent/settings.json` 的 `packages`：
 
 ```jsonc
-{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.13.0"] }
+{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.14.0"] }
 ```
 
-> 版本锁：git 安装可用 `@v0.13.0`（pi）/ `#v0.13.0`（omp）；npm 安装默认 `latest`（`0.13.0`）。
+> 版本锁：git 安装可用 `@v0.14.0`（pi）/ `#v0.14.0`（omp）；npm 安装默认 `latest`（`0.14.0`）。
 
 ## 配置
 
 配置统一放在宿主设置里的 `anchoredTools` 顶层键。项目配置深合并覆盖全局：嵌套对象递归合并、**数组整体替换**（不拼接）、项目优先。
 
-| 配置项                     | 类型 / 默认值                                                 | 说明                                                                                 |
-| -------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `enabled`                  | `boolean` / `true`                                            | 总开关                                                                               |
-| `models`                   | `string[]` / `["deepseek-v4-pro"]`                            | 目标模型 glob；含 `/` 只匹配 `provider/modelId`，裸名两种都匹配；`[]` 不锚定任何模型 |
-| `bootstrapMode`            | `"two-tool" \| "zero"` / `"two-tool"`                         | 首轮工具面模式                                                                       |
-| `bootstrapTools`           | `string[]` / `["bash", "read"]`                               | two-tool 模式首轮工具；`bash`/`pwsh` 按平台 shell 归一化                             |
-| `promoteOn`                | `"tool-call" \| "assistant-message" \| "either"` / `"either"` | 持久提升信号                                                                         |
-| `minimalSystemPrompt`      | `boolean` / `true`                                            | 系统提示改写为 DSH minimal 人设（永久生效）                                          |
-| `bootstrapMaxTokens`       | `number \| undefined` / 不封顶                                | 可选首请求输出预算封顶；**仅 pi 生效**                                               |
-| `taskRouting`              | `boolean` / `false`                                           | 任务感知路由，仅 two-tool 模式                                                       |
-| `routerMode`               | `"standard" \| "spec"` / `"standard"`                         | `taskRouting: true` 时生效；standard=RL 接口还原，spec=深度思考优先                  |
-| `suppressedContextSources` | `string[]` / `["skill-catalog", "agent-instructions"]`        | 首请求剥离的自动注入上下文；`[]` 关闭剥离                                            |
-| `compactionTools`          | `string[]` / `[]`                                             | compaction 后、重新提升前的工作集                                                    |
-| `promotedTools`            | `string[]` / `["bash", "read", "edit", "glob", "grep"]`       | 提升后 resident 工具集（默认，对齐上游 post-promotion）；`[]` = 恢复完整目录         |
-| `includeSubagents`         | `boolean` / `false`                                           | `true` 时子代理也走 bootstrap/anchor 阶段；omp 生效                                  |
-| `anchorText`               | `string` / `This round is a test. ...`                        | zero 模式 anchor 文本                                                                |
-| `notify`                   | `boolean` / `true`                                            | 提升时一次性 TUI 通知                                                                |
+| 配置项                     | 类型 / 默认值                                                 | 说明                                                                                         |
+| -------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `enabled`                  | `boolean` / `true`                                            | 总开关                                                                                       |
+| `models`                   | `string[]` / `["deepseek-v4-pro", "deepseek-v4-flash"]`       | 目标模型 glob；含 `/` 只匹配 `provider/modelId`，裸名两种都匹配；`[]` 不锚定任何模型         |
+| `modelConfigs`             | `Record<string, RawConfig>` / 内置 pro+flash 档               | 按模型 glob 分别存放的配置覆盖；缺省时零配置启用内置两档，显式 `models` 后回退为单一共享配置 |
+| `bootstrapMode`            | `"two-tool" \| "zero"` / `"two-tool"`                         | 首轮工具面模式                                                                               |
+| `bootstrapTools`           | `string[]` / `["bash", "read"]`                               | two-tool 模式首轮工具；`bash`/`pwsh` 按平台 shell 归一化                                     |
+| `promoteOn`                | `"tool-call" \| "assistant-message" \| "either"` / `"either"` | 持久提升信号                                                                                 |
+| `minimalSystemPrompt`      | `boolean` / `true`                                            | 系统提示改写为 DSH minimal 人设（永久生效）                                                  |
+| `bootstrapMaxTokens`       | `number \| undefined` / 不封顶                                | 可选首请求输出预算封顶；**仅 pi 生效**                                                       |
+| `taskRouting`              | `boolean` / `false`                                           | 任务感知路由，仅 two-tool 模式                                                               |
+| `routerMode`               | `"standard" \| "spec"` / `"standard"`                         | `taskRouting: true` 时生效；standard=RL 接口还原，spec=深度思考优先                          |
+| `suppressedContextSources` | `string[]` / `["skill-catalog", "agent-instructions"]`        | 首请求剥离的自动注入上下文；`[]` 关闭剥离                                                    |
+| `compactionTools`          | `string[]` / `[]`                                             | compaction 后、重新提升前的工作集                                                            |
+| `promotedTools`            | `string[]` / `["bash", "read", "edit", "glob", "grep"]`       | 提升后 resident 工具集（默认，对齐上游 post-promotion）；`[]` = 恢复完整目录                 |
+| `includeSubagents`         | `boolean` / `false`                                           | `true` 时子代理也走 bootstrap/anchor 阶段；omp 生效                                          |
+| `anchorText`               | `string` / `This round is a test. ...`                        | zero 模式 anchor 文本                                                                        |
+| `notify`                   | `boolean` / `true`                                            | 提升时一次性 TUI 通知                                                                        |
 
 ### omp 示例
 
@@ -105,25 +106,21 @@ anchoredTools:
     enabled: true
     models:
         - deepseek-v4-pro
+        - deepseek-v4-flash
+    modelConfigs:
+        deepseek-v4-pro:
+            bootstrapTools: [bash, read]
+            promoteOn: either
+            promotedTools: [bash, read, edit, glob, grep]
+        deepseek-v4-flash:
+            taskRouting: true
+            routerMode: spec
+            promoteOn: tool-call
+            promotedTools: []
     bootstrapMode: two-tool
     bootstrapTools:
         - bash
         - read
-    promoteOn: either
-    taskRouting: false
-    routerMode: standard
-    minimalSystemPrompt: true
-    suppressedContextSources:
-        - skill-catalog
-        - agent-instructions
-    compactionTools: []
-    promotedTools:
-        - bash
-        - read
-        - edit
-        - glob
-        - grep
-    includeSubagents: false
     notify: true
 ```
 
@@ -137,26 +134,41 @@ anchoredTools:
 {
 	"anchoredTools": {
 		"enabled": true,
-		"models": ["deepseek-v4-pro"],
+		"models": ["deepseek-v4-pro", "deepseek-v4-flash"],
+		"modelConfigs": {
+			"deepseek-v4-pro": {
+				"bootstrapTools": ["bash", "read"],
+				"promoteOn": "either",
+				"promotedTools": ["bash", "read", "edit", "glob", "grep"],
+			},
+			"deepseek-v4-flash": {
+				"taskRouting": true,
+				"routerMode": "spec",
+				"promoteOn": "tool-call",
+				"promotedTools": [],
+			},
+		},
 		"bootstrapMode": "two-tool",
 		"bootstrapTools": ["bash", "read"],
-		"promoteOn": "either",
-		"minimalSystemPrompt": true,
-		"taskRouting": false,
-		"routerMode": "standard",
-		"anchorText": "This round is a test. Tools are not open yet; all tools will open next round.",
-		"suppressedContextSources": ["skill-catalog", "agent-instructions"],
-		"compactionTools": [],
-		"promotedTools": ["bash", "read", "edit", "glob", "grep"],
-		"includeSubagents": false,
 		"notify": true,
 	},
 }
 ```
 
-改完 `/reload`。
-
 ## 行为细节
+
+### `modelConfigs`
+
+零配置时内置两套独立默认档（分别对应上游实测最优）：
+
+| 模型                | 默认档                                                                                             |
+| ------------------- | -------------------------------------------------------------------------------------------------- |
+| `deepseek-v4-pro`   | 纯 anchored-standard：`taskRouting: false`、`promoteOn: either`、resident 集                       |
+| `deepseek-v4-flash` | 路由套件 Flash 档：`taskRouting: true`、`routerMode: spec`、`promoteOn: tool-call`、提升后完整目录 |
+
+- 键是模型 glob（匹配规则与 `models` 相同），值是 `anchoredTools` 允许的任意键覆盖。
+- 显式配置 `modelConfigs` 时，每个模型先继承共享顶层配置、再由自身档覆盖（`deepMerge`）。
+- 显式给出 `models`（数组）但未给 `modelConfigs` 时，回到旧的「所有目标模型共用一套顶层配置」行为，不启用内置档。
 
 ### `promoteOn`
 
@@ -253,6 +265,13 @@ test/
 
 ## 更新记录
 
+### 0.14.0
+
+- 默认同时锚定 `deepseek-v4-pro` 与 `deepseek-v4-flash`，两模型各自使用独立内置档（`modelConfigs`），不再共用同一套配置。
+- Pro 档：纯 anchored-standard（`taskRouting: false`、`promoteOn: either`、resident 集）。
+- Flash 档：对齐 dsh-routing-suite / v4-flash-godmode-opencode-go（`taskRouting: true`、`routerMode: spec`、`promoteOn: tool-call`、提升后完整目录）。
+- 显式 `models` 数组但未给 `modelConfigs` 时保持旧的单一共享配置行为；文档与测试同步更新。
+
 ### 0.13.0
 
 - 对齐上游 `dsh-anchored-standard` 最新 post-promotion resident 行为：`promotedTools` 默认从 `[]`（完整目录）改为 `["bash", "read", "edit", "glob", "grep"]`（shell + 常用文件工具）。
@@ -299,7 +318,7 @@ test/
 - `bootstrapMode: "zero"` 的 anchor 轮结束后需要用户继续一句，真实消息不自动推迟。
 - pi 无 `session_init`，子代理豁免（`includeSubagents: false`）仅 omp 能识别。
 - `bootstrapMaxTokens` 默认不封顶且仅 pi 生效。
-- `models` 默认 `["deepseek-v4-pro"]`；显式配置 `[]` 可关闭锚定。
+- `models` 默认 `["deepseek-v4-pro", "deepseek-v4-flash"]`；显式配置 `[]` 可关闭锚定。零配置下两模型各自使用 `modelConfigs` 内置档，显式 `models` 数组则回到单一共享配置。
 
 ## 参考实现
 

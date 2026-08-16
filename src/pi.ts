@@ -66,6 +66,7 @@ import {
 	isSubagentSession,
 	isTargetModel,
 	memoizedPromotionPhase,
+	modelConfigFor,
 	MINIMAL_SYSTEM_PROMPT,
 	promotionPhase,
 	promoteTrigger,
@@ -84,6 +85,7 @@ import {
 	validateRawConfig,
 	zeroAnchorPayload,
 	type Config,
+	type ModelConfig,
 	type EntryLike,
 	type PayloadMessage,
 	type RawConfig,
@@ -152,7 +154,7 @@ export default function (pi: ExtensionAPI) {
 	const maybeNotifyPromoted = (
 		sid: string | undefined,
 		modelId: string,
-		cfg: Config,
+		cfg: ModelConfig,
 		ctx: {
 			ui: {
 				notify(
@@ -177,7 +179,8 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("before_provider_request", (event, ctx) => {
-		const cfg = loadConfig(ctx, console.warn);
+		const baseCfg = loadConfig(ctx, console.warn);
+		const cfg = modelConfigFor(baseCfg, ctx.model);
 		if (!cfg.enabled || cfg.models.length === 0) return;
 		if (!isTargetModel(cfg, ctx.model)) return;
 		const sid = ctx.sessionManager.getSessionId();
@@ -389,7 +392,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", (event, ctx) => {
-		const cfg = loadConfig(ctx, console.warn);
+		const baseCfg = loadConfig(ctx, console.warn);
+		const cfg = modelConfigFor(baseCfg, ctx.model);
 		if (!isTargetModel(cfg, ctx.model) || !cfg.notify) return;
 		const sid = ctx.sessionManager.getSessionId();
 		if (!sid || !anchoredSessions.get(sid) || notified.has(sid)) return;
@@ -400,7 +404,8 @@ export default function (pi: ExtensionAPI) {
 		);
 	});
 	pi.on("message_end", (event, ctx) => {
-		const cfg = loadConfig(ctx, console.warn);
+		const baseCfg = loadConfig(ctx, console.warn);
+		const cfg = modelConfigFor(baseCfg, ctx.model);
 		if (!isTargetModel(cfg, ctx.model)) return;
 		const msg = event.message as
 			{ role?: string; content?: unknown } | undefined;
@@ -434,8 +439,9 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Show anchored tool bootstrap status (model targeting, current phase)",
 		handler: async (_args, ctx) => {
-			const cfg = loadConfig(ctx, console.warn);
+			const baseCfg = loadConfig(ctx, console.warn);
 			const model = ctx.model;
+			const cfg = modelConfigFor(baseCfg, model);
 			const matched = isTargetModel(cfg, model);
 			const entries = ctx.sessionManager.buildContextEntries();
 			const promotion = promotionPhase(entries, promoteTrigger(cfg));
@@ -471,7 +477,7 @@ export default function (pi: ExtensionAPI) {
 				`enabled: ${cfg.enabled}`,
 				`mode: ${cfg.bootstrapMode}`,
 				`promote on: ${cfg.promoteOn}`,
-				`target models: ${cfg.models.join(", ") || "(none — no model is anchored)"}`,
+				`target models: ${baseCfg.models.join(", ") || "(none — no model is anchored)"}`,
 				`task routing: ${cfg.taskRouting ? `on (routerMode=${cfg.routerMode}, task=${taskMode})` : "off"}`,
 				`bootstrap tools: ${selected ? `${selected.tools.join(", ")} (${selected.used})` : cfg.bootstrapTools.join(", ")}`,
 				`compaction tools: ${cfg.compactionTools.join(", ") || "(none)"}`,

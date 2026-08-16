@@ -11,6 +11,7 @@ import {
 	countTrajectory,
 	deepMerge,
 	DEFAULT_PROMOTED_TOOLS,
+	DEFAULTS,
 	extractRaw,
 	filterTools,
 	hasAssistantMessage,
@@ -23,6 +24,7 @@ import {
 	isTargetModel,
 	lastUserIndex,
 	matchGlob,
+	modelConfigFor,
 	memoizedIsPromoted,
 	MINIMAL_SYSTEM_PROMPT,
 	modelMatches,
@@ -677,26 +679,8 @@ describe("extractRaw", () => {
 });
 
 describe("applyDefaults", () => {
-	const fullDefaults = {
-		enabled: true,
-		models: ["deepseek-v4-pro"],
-		bootstrapTools: ["bash", "read"],
-		notify: true,
-		bootstrapMode: "two-tool",
-		promoteOn: "either",
-		anchorText: ANCHOR_TEXT,
-		minimalSystemPrompt: true,
-		bootstrapMaxTokens: undefined,
-		taskRouting: false,
-		routerMode: "standard",
-		suppressedContextSources: ["skill-catalog", "agent-instructions"],
-		compactionTools: [],
-		includeSubagents: false,
-		promotedTools: [...DEFAULT_PROMOTED_TOOLS],
-	};
-
 	test("empty raw config resolves to DEFAULTS", () => {
-		assert.deepStrictEqual(applyDefaults({}), fullDefaults);
+		assert.deepStrictEqual(applyDefaults({}), DEFAULTS);
 	});
 	test("model arrays are deduplicated", () => {
 		assert.deepStrictEqual(
@@ -743,7 +727,85 @@ describe("applyDefaults", () => {
 			compactionTools: [],
 			includeSubagents: false,
 			promotedTools: [...DEFAULT_PROMOTED_TOOLS],
+			modelConfigs: {},
 		});
+	});
+	test("zero-config enables pro and flash with distinct profiles", () => {
+		const cfg = applyDefaults({});
+		assert.deepStrictEqual(cfg.models, [
+			"deepseek-v4-pro",
+			"deepseek-v4-flash",
+		]);
+		assert.deepStrictEqual(
+			cfg.modelConfigs["deepseek-v4-pro"]!.taskRouting,
+			false,
+		);
+		assert.deepStrictEqual(
+			cfg.modelConfigs["deepseek-v4-flash"]!.taskRouting,
+			true,
+		);
+		assert.deepStrictEqual(
+			cfg.modelConfigs["deepseek-v4-flash"]!.routerMode,
+			"spec",
+		);
+		assert.deepStrictEqual(
+			cfg.modelConfigs["deepseek-v4-flash"]!.promoteOn,
+			"tool-call",
+		);
+		assert.deepStrictEqual(
+			cfg.modelConfigs["deepseek-v4-flash"]!.promotedTools,
+			[],
+		);
+	});
+	test("modelConfigFor selects the matching profile", () => {
+		const cfg = applyDefaults({});
+		const pro = modelConfigFor(cfg, {
+			id: "deepseek-v4-pro",
+			provider: "deepseek",
+		});
+		const flash = modelConfigFor(cfg, {
+			id: "deepseek-v4-flash",
+			provider: "deepseek",
+		});
+		assert.equal(pro.taskRouting, false);
+		assert.equal(flash.taskRouting, true);
+		assert.equal(flash.routerMode, "spec");
+	});
+	test("modelConfigFor falls back to the shared base config", () => {
+		const cfg = applyDefaults({ models: ["gpt-5"] });
+		const other = modelConfigFor(cfg, {
+			id: "gpt-5",
+			provider: "openai",
+		});
+		assert.equal(other.taskRouting, false);
+	});
+	test("explicit models keep one shared config (no built-in profiles)", () => {
+		const cfg = applyDefaults({ models: ["a", "b"] });
+		assert.deepStrictEqual(cfg.modelConfigs, {});
+		assert.deepStrictEqual(cfg.models, ["a", "b"]);
+	});
+	test("custom modelConfigs override the shared base per model", () => {
+		const cfg = applyDefaults({
+			models: ["deepseek-v4-pro", "deepseek-v4-flash"],
+			modelConfigs: {
+				"deepseek-v4-flash": {
+					promoteOn: "either",
+					promotedTools: ["bash"],
+				},
+			},
+		});
+		const flash = modelConfigFor(cfg, {
+			id: "deepseek-v4-flash",
+			provider: "deepseek",
+		});
+		assert.equal(flash.promoteOn, "either");
+		assert.deepStrictEqual(flash.promotedTools, ["bash"]);
+		// The un-overridden pro profile keeps the shared base value.
+		const pro = modelConfigFor(cfg, {
+			id: "deepseek-v4-pro",
+			provider: "deepseek",
+		});
+		assert.equal(pro.promoteOn, "either");
 	});
 	test("invalid bootstrapMode and promoteOn normalize to defaults", () => {
 		const cfg = applyDefaults({
