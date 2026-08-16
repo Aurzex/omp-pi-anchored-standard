@@ -1,128 +1,132 @@
 # omp-pi-anchored-standard
 
-给 **omp**(Oh My Pi)和 **pi**(pi-coding-agent)用的 "anchored standard" 插件:把目标模型的**第一个请求**锚定到最小工具目录 + 小输出预算 + DSH 人设,会话记录到**第一个持久提升信号**后恢复完整工具目录(或可选的 post-promotion resident 工具集)与正常预算。**默认零配置可用**:未配置 `anchoredTools` 时自动锚定 `deepseek-v4-pro` 并使用纯 anchored-standard 行为(`taskRouting: false`,实测稳定复现 `We need` 风格);任务感知路由(`taskRouting: true`,参考 [yjh051108/dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite))可选开启。
+给 **omp**（Oh My Pi）和 **pi**（pi-coding-agent）使用的 "anchored standard" 插件。核心思路：把目标模型的**第一个请求**锚定到最小工具目录 + DSH 人设，在会话记录到**第一个持久提升信号**后恢复完整工具目录（或可选的 resident 工具集）与正常预算。
+
+**默认零配置可用**：未配置 `anchoredTools` 时自动锚定 `deepseek-v4-pro`，使用纯 anchored-standard 行为（`taskRouting: false`），实测稳定复现 `We need` 风格。任务感知路由（`taskRouting: true`）可选开启，参考 [dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite)。
+
+> 这是 prompt 条件化实验补丁，不是正确性保证；底层评测是单一私人评测，不是普适结论。插件无网络请求、无遥测。
 
 ## 为什么存在
 
-DeepSeek V4 Pro 对 API 可见的工具目录高度敏感。Project2 评测(DeepSeek V4 Pro, `reasoningEffort=max`)中:
+DeepSeek V4 Pro 对 API 可见的工具目录高度敏感。Project2 评测（DeepSeek V4 Pro，`reasoningEffort=max`）：
 
-| Preset                | Ability (run1/run2) | `let me` 计数 | 工具目录       |
-| --------------------- | ------------------: | ------------: | -------------- |
-| Standard              |                  91 |           208 | 完整 (25 个)   |
-| PTC                   |                  92 |           194 | `run_code`     |
-| Minimal               |             99 / 96 |         0 / 0 | 2 个           |
-| **Anchored Standard** |         **98 / 99** |     **1 / 0** | 先 2 个,后完整 |
+| Preset                | Ability (run1/run2) | `let me` 计数 | 工具目录        |
+| --------------------- | ------------------: | ------------: | --------------- |
+| Standard              |                  91 |           208 | 完整（25 个）   |
+| PTC                   |                  92 |           194 | `run_code`      |
+| Minimal               |             99 / 96 |         0 / 0 | 2 个            |
+| **Anchored Standard** |         **98 / 99** |     **1 / 0** | 先 2 个，后完整 |
 
-也就是:宽工具目录对**首请求**有害(高 `let me`、计划退化),但永久停在 Minimal 会丢掉 Standard 的工具集。两阶段做法:
+宽工具目录对**首请求**有害（高 `let me`、计划退化），但永久停在 Minimal 会丢掉 Standard 的工具集。因此采用两阶段：
 
-1. **第一个模型请求** → 只暴露首轮核心工具(`bootstrapMode: "two-tool"`,默认;任务感知路由下按任务类型选 `read`/`write`/`edit`/`glob`/`grep` + shell),或零工具 + 固定 anchor 回合(`bootstrapMode: "zero"`)。
-2. **第一个持久提升信号之后**(按 `promoteOn`)→ 恢复完整目录(默认,能力无损失);若配置 `promotedTools`,则切到上游实测的 post-promotion resident 工具集(避免 25 个工具一次性灌回导致轨迹回退)。
+1. **第一个模型请求** → 只暴露首轮核心工具（`bootstrapMode: "two-tool"`，默认），或零工具 + 固定 anchor 回合（`bootstrapMode: "zero"`）。
+2. **第一个持久提升信号之后**（按 `promoteOn`）→ 恢复完整目录（默认，能力无损失）；配置 `promotedTools` 后切到上游实测的 post-promotion resident 工具集，避免 25 个工具一次性灌回导致轨迹回退。
 
-> 这是 prompt 条件化实验补丁,不是正确性保证;底层评测是单一私人评测,不是普适结论。无网络请求、无遥测。
-
-## 行为语义
-
-- **`promoteOn`(默认 `either`,对齐上游最新版)**:`tool-call` = 第一个持久 tool call;`assistant-message` = 第一个持久 assistant 消息;`either` = 两者先到者。默认 `either` 保证纯文本首答也会在下一轮提升,不会把会话永远困在 bootstrap;要复刻旧版"第一个 `tool/call` 后恢复完整目录"可显式配置 `tool-call`。
-- 失败的 tool call 也算持久信号 → 提升。
-- 目录每个锚定阶段**只变一次**(一次 request-prefix cache 断层);compaction 后作为「第二个首请求」重新收窄。
-- 阶段从**持久会话条目**推导(`getBranch()` / `buildContextEntries()`),`/resume`、`/reload` 自动保留。
-- 配置里的 bootstrap 工具名在目录里缺失 → **fail-safe**:跳过过滤并告警,绝不静默剥工具。
-- 非目标模型完全不受影响;`models` 默认 `["deepseek-v4-pro"]`(零配置即可用),显式配置 `[]` 才不锚定任何模型。
-- 两阶段提升决策按会话 id 在进程内记忆,扫描只做一次;`session_compact` 后重置该会话的 memo(compaction epoch,对齐上游 `compaction-epoch.mjs`)。
-- **宿主机制不同**(行为一致):omp 侧通过 `pi.setActiveTools()` 原生收窄/恢复活动工具集(`before_provider_request` 的 payload 替换在 openai-completions 传输层被丢弃,不可靠),zero 模式 anchor 消息经 `context` 事件注入(序列化前生效,所有传输层都遵守);pi 侧沿用 pi 移植的 `before_provider_request` payload 过滤(pi 端口已验证有效)。
-- **`minimalSystemPrompt`(默认 `true`)**:目标模型的系统提示被整体改写为 DSH minimal 人设(`You are a helpful software engineer assistant.`,与上游 Harness `minimal` preset 逐字节一致)。这是与工具目录**同级**的轨迹锚点:改写措辞会破坏 `We need` 推理风格,故永久生效(整段会话),只有工具目录提升。设 `false` 保留宿主默认系统提示。omp 经 `before_agent_start` 返回 `systemPrompt` 替换;pi 经 payload 的顶层 `system` / `messages[0]`(role `system`/`developer`)改写。
-- **默认 bootstrap 工具对 `["bash", "read"]`**:modeltest 的 98/99 分 anchored-standard 冻结快照(`tools/deepseek-harness-presets/anchored-standard`)首请求只暴露**当前平台 shell + `read`**(Windows 为 `pwsh/read`,Linux/macOS 为 `bash/read`),第一个持久提升信号后恢复完整目录(默认;可配置 `promotedTools` 为 resident 集)。omp/pi 默认按宿主平台归一化 shell,并保留 `read` 作为首轮读文件工具;若目录里存在 `str_replace_editor`(例如 DSH 方言)且想复刻上游 Minimal 的精确 schema,可显式配置 `["bash", "str_replace_editor"]`。`bash`/`pwsh` 条目会按目录里实际存在的平台 shell 归一化(`pwsh` 优先,对齐上游 router-bootstrap)。
-- **`bootstrapMaxTokens`(默认不封顶,仅 pi)**:可选的首请求输出预算封顶。上游 issue #11 实测:Minimal 工具 schema 在适配器默认 maxTokens(256000)下**无需封顶**即可锚定 `We need` 轨迹(5/5),而封顶的送达依赖 profile package 的 `prepareCall` 行为(rc.5 源码可达请求,rc.6 预构建包会被 `adapterDefaults.maxTokens` 覆盖)。故默认不封顶(opt-in);配置后才封顶,提升后剥离注入的上限。omp 无原生 max-token 控制且 `before_provider_request` 返回值被 openai-completions 传输层丢弃,故此配置在 omp 侧仅做校验、不生效。
-- **`promotedTools`(默认 `[]`,即恢复完整目录)**:上游 dsh-anchored-standard 最新版在提升后不再一次性灌回完整 Standard 目录,而是收窄到 resident 集(默认 `bash`+`str_replace_editor` + 发现工具 + 已解锁工具),避免 post-promotion 回归。omp/pi 默认保留"完整目录"承诺;若想复刻上游 resident 行为,配置 `promotedTools` 为提升后常驻的工具名(如 `["bash", "read", "edit", "glob", "grep"]`)。`bash`/`pwsh` 条目同样按平台 shell 归一化;缺失时 fail-safe 保持完整目录。
-- **`includeSubagents`(默认 `false`)**:上游 `compaction-epoch.mjs` 默认子代理(`delegationDepth > 0`)直接视为已提升,`includeSubagents: true` 才让子代理也走 bootstrap/anchor 阶段。omp 用 `session_init` 识别子代理;pi 会话模型没有该条目,此选项主要对 omp 生效。
-- **`taskRouting`(默认 `false`,仅 `two-tool` 模式)**:参考 [dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite) / dsh-router-standard 的实测路由。首轮前从会话第一条用户消息分类任务:`react`(新建/开发)→ doer persona + 写优先工具(`read`/`write`/`edit`);`spec`(修复/维护)→ DSH minimal persona + 读优先工具(`read`/`edit`/`glob`/`grep`);`weak`(模糊/无关键词)→ 模型自分类 persona(w6c/w7)+ 写优先工具。**Flash 模型一律强制 `weak`**(w7 + 静态深度思考/决策闭环锚,参考 [v4-flash-godmode-opencode-go](https://github.com/SheberDavid/v4-flash-godmode-opencode-go):omp/pi 无 DSH 式 per-message inbox,近场引导必须静态并入 persona)。`routerMode` 默认 `standard`(上游 v0.2.0 新默认):首轮系统只保留 RL 训练句,工具面为 shell + `str_replace_editor`;`routerMode: "spec"` 才走旧版分类 persona + 读/写/编辑工具面。路由工具缺失时回退到 `bootstrapTools`,再缺失才 fail-safe。默认 `taskRouting: false` 走纯 anchored-standard(固定 DSH minimal persona + `bootstrapTools`),实测稳定复现 `We need` 风格;设 `true` 启用任务感知路由。
-- **`suppressedContextSources`(默认 `["skill-catalog", "agent-instructions"]`)**:首请求剥离自动注入的 AGENTS.md / skill-catalog / workspace 摘要——上游 issue #11 的 omp/pi 移植。消息携带 `source.kind` 时按来源精确过滤;omp/pi 消息无 `source.kind`,故按「只保留 system + last user」重建。显式配置 `[]` 关闭剥离而保留工具锚定。含 assistant/toolResult 的多轮历史不重建。
-
-上游新增的实验对比模式:首请求**零工具** + 一条固定 anchor 用户消息(默认 `This round is a test. Tools are not open yet; all tools will open next round.`,可配置;上游 whoami-standard 的 `你是谁` 也可通过 `anchorText` 配置),让第一条推理链走零注入轨迹;anchor 回复落库后恢复完整目录(默认)或 `promotedTools` resident 集。本插件的移植:
-
-- 首请求活动工具集置空(`omp` 经 `setActiveTools([])`;pi 经 payload `tools: []`),并把最后一个 user 消息的内容替换为 anchor 文本(真实消息仍持久化在会话里,下一轮继续时用完整目录/resident 集回答)。
-- 提升信号固定为 `assistant-message`(anchor 回复),忽略 `promoteOn`。
-- 子代理(task)会话默认豁免:omp 会话条目含 `session_init` → 始终完整目录;设 `includeSubagents: true` 才让子代理也走 anchor/bootstrap(pi 无 `session_init`,同等对待)。
-- **compaction 后**:zero 模式不再注入 anchor;若配置了 `compactionTools`,首轮暴露平台 shell + 该工作集,否则继续保持零工具,直到新的 assistant 消息重新提升。
-- **与上游的差异**:上游把真实消息自动推迟到下一轮(带工具的轮次);本插件无法安全推迟持久化消息,故 anchor 轮结束后需要用户继续一句(anchor 回复本身会提示),真实消息在后续轮次用完整目录/resident 集回答。
-
-## 目录结构
+## 工作原理
 
 ```text
-src/
-  core.ts   # 共享纯逻辑:toolName / deepMerge / matchGlob / modelMatches / promotionPhase / routeTaskMode / selectBootstrapTools / selectPromotedTools / selectZeroBootstrapTools / filterTools / zeroAnchorPayload / stripContextMessages / rewriteSystemPrompt / capMaxTokens / countTrajectory / extractRaw / applyDefaults / validateRawConfig
-  omp.ts    # omp 入口:setActiveTools 收窄/恢复 + context 注入 anchor + before_agent_start 替换 systemPrompt + config.yml(YAML)
-  pi.ts     # pi 入口:before_provider_request + buildContextEntries() + settings.json
-test/
-  core.test.ts   # node:test 单测(136 例)
+第一请求                          持久提升信号后                 compaction 后
+────────────────────             ────────────────────          ────────────────────
+two-tool: shell + read           完整目录 / promotedTools       bootstrap 工具 + compactionTools
+zero:     空工具 + anchor 回合    完整目录 / promotedTools       空 / shell + compactionTools
 ```
+
+- 阶段从**持久会话条目**推导（`getBranch()` / `buildContextEntries()`），`/resume`、`/reload` 自动保留。
+- 每个锚定阶段**只变一次**（一次 request-prefix cache 断层）。
+- compaction 后作为「第二个首请求」重新收窄，直到新的持久提升信号出现。
+- 提升决策按会话 id 在进程内记忆；`session_compact` 后重置该会话的 memo（对齐上游 `compaction-epoch.mjs`）。
+- 失败的 tool call 也算持久信号 → 提升。
 
 ## 安装
 
-已发布到 npm(`omp-pi-anchored-standard@0.11.0`)。仓库的 `package.json` 也声明了两个宿主的入口(`omp.extensions` / `pi.extensions`),npm 与 git 安装都会自动加载正确入口。
+当前版本：`omp-pi-anchored-standard@0.11.1`
 
 ### omp
-
-npm(推荐):
 
 ```sh
 omp plugin install omp-pi-anchored-standard
 ```
 
-或从仓库安装:
+或从仓库安装：
 
 ```sh
 omp plugin install github:Aurzex/omp-pi-anchored-standard
 ```
 
-> `omp plugin install` 依赖本机 `bun` 命令;没有 bun 时,手动拷进扩展目录即可:
->
-> ```sh
-> mkdir -p ~/.omp/agent/extensions
-> cp -r /path/to/omp-pi-anchored-standard ~/.omp/agent/extensions/omp-pi-anchored-standard
-> ```
+没有 `bun` 时手动拷贝：
 
-默认配置即可用(自动锚定 `deepseek-v4-pro`,纯 anchored-standard;`taskRouting` 默认关闭)。如需覆盖,在全局 `~/.omp/agent/config.yml` 或某项目的 `<项目>/.omp/config.yml` 配置:
-
-```yaml
-anchoredTools:
-    enabled: true
-    models:
-        - deepseek-v4-pro # 默认值;glob;含 "/" 只匹配 "provider/modelId",裸名两种都匹配
-    bootstrapMode: two-tool # "two-tool" | "zero"
-    bootstrapTools:
-        - bash
-        - read # 默认 shell+read;目录存在 str_replace_editor 时可显式改为 [bash, str_replace_editor]
-    promoteOn: either # "tool-call" | "assistant-message" | "either"(默认对齐上游最新)
-    taskRouting: false # 任务感知路由;开启后 routerMode 生效
-    routerMode: standard # "standard" | "spec";standard=RL 接口还原,spec=深度思考优先
-    minimalSystemPrompt: true # 系统提示 → DSH/route persona(永久)
-    suppressedContextSources:
-        - skill-catalog
-        - agent-instructions # 显式 [] 关闭首请求上下文剥离
-    compactionTools: [] # compaction 后、重新提升前的工作集(默认无)
-    promotedTools: [] # 提升后常驻工具;[] = 恢复完整目录(默认)
-    includeSubagents: false # true 时子代理也走 bootstrap/anchor 阶段
-    notify: true # 提升时一次性 TUI 通知
+```sh
+mkdir -p ~/.omp/agent/extensions
+cp -r /path/to/omp-pi-anchored-standard ~/.omp/agent/extensions/omp-pi-anchored-standard
 ```
 
-项目配置深合并覆盖全局:嵌套对象递归合并、**数组整体替换**(不拼接)、项目优先。改完重启 omp。
-
 ### pi
-
-npm(推荐):
 
 ```sh
 pi install omp-pi-anchored-standard
 ```
 
-或把仓库加进 `~/.pi/agent/settings.json` 的 `packages`,`/reload` 后自动安装:
+或加入 `~/.pi/agent/settings.json` 的 `packages`：
 
 ```jsonc
-{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.11.0"] }
+{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.11.1"] }
 ```
 
-默认配置即可用(自动锚定 `deepseek-v4-pro`,纯 anchored-standard;`taskRouting` 默认关闭)。如需覆盖,在全局 `~/.pi/agent/settings.json` + 可信项目的 `.pi/settings.json` 配置(语义同上):
+> 版本锁：git 安装可用 `@v0.11.1`（pi）/ `#v0.11.1`（omp）；npm 安装默认 `latest`（`0.11.1`）。
+
+## 配置
+
+配置统一放在宿主设置里的 `anchoredTools` 顶层键。项目配置深合并覆盖全局：嵌套对象递归合并、**数组整体替换**（不拼接）、项目优先。
+
+| 配置项                     | 类型 / 默认值                                                 | 说明                                                                                 |
+| -------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `enabled`                  | `boolean` / `true`                                            | 总开关                                                                               |
+| `models`                   | `string[]` / `["deepseek-v4-pro"]`                            | 目标模型 glob；含 `/` 只匹配 `provider/modelId`，裸名两种都匹配；`[]` 不锚定任何模型 |
+| `bootstrapMode`            | `"two-tool" \| "zero"` / `"two-tool"`                         | 首轮工具面模式                                                                       |
+| `bootstrapTools`           | `string[]` / `["bash", "read"]`                               | two-tool 模式首轮工具；`bash`/`pwsh` 按平台 shell 归一化                             |
+| `promoteOn`                | `"tool-call" \| "assistant-message" \| "either"` / `"either"` | 持久提升信号                                                                         |
+| `minimalSystemPrompt`      | `boolean` / `true`                                            | 系统提示改写为 DSH minimal 人设（永久生效）                                          |
+| `bootstrapMaxTokens`       | `number \| undefined` / 不封顶                                | 可选首请求输出预算封顶；**仅 pi 生效**                                               |
+| `taskRouting`              | `boolean` / `false`                                           | 任务感知路由，仅 two-tool 模式                                                       |
+| `routerMode`               | `"standard" \| "spec"` / `"standard"`                         | `taskRouting: true` 时生效；standard=RL 接口还原，spec=深度思考优先                  |
+| `suppressedContextSources` | `string[]` / `["skill-catalog", "agent-instructions"]`        | 首请求剥离的自动注入上下文；`[]` 关闭剥离                                            |
+| `compactionTools`          | `string[]` / `[]`                                             | compaction 后、重新提升前的工作集                                                    |
+| `promotedTools`            | `string[]` / `[]`                                             | 提升后 resident 工具集；`[]` = 恢复完整目录                                          |
+| `includeSubagents`         | `boolean` / `false`                                           | `true` 时子代理也走 bootstrap/anchor 阶段；omp 生效                                  |
+| `anchorText`               | `string` / `This round is a test. ...`                        | zero 模式 anchor 文本                                                                |
+| `notify`                   | `boolean` / `true`                                            | 提升时一次性 TUI 通知                                                                |
+
+### omp 示例
+
+全局 `~/.omp/agent/config.yml` 或项目 `<项目>/.omp/config.yml`：
+
+```yaml
+anchoredTools:
+    enabled: true
+    models:
+        - deepseek-v4-pro
+    bootstrapMode: two-tool
+    bootstrapTools:
+        - bash
+        - read
+    promoteOn: either
+    taskRouting: false
+    routerMode: standard
+    minimalSystemPrompt: true
+    suppressedContextSources:
+        - skill-catalog
+        - agent-instructions
+    compactionTools: []
+    promotedTools: []
+    includeSubagents: false
+    notify: true
+```
+
+改完重启 omp。
+
+### pi 示例
+
+全局 `~/.pi/agent/settings.json` + 可信项目的 `.pi/settings.json`：
 
 ```jsonc
 {
@@ -147,15 +151,75 @@ pi install omp-pi-anchored-standard
 
 改完 `/reload`。
 
-> 版本锁:git 安装可用 `@v0.11.0`(pi)/ `#v0.11.0`(omp);npm 安装默认就是 `latest`(`0.11.0`)。
+## 行为细节
+
+### `promoteOn`
+
+- `tool-call`：第一个持久 tool call 后提升。
+- `assistant-message`：第一个持久 assistant 消息后提升。
+- `either`（默认）：两者先到者，纯文本首答也会在下一轮提升。
+- zero 模式固定使用 `assistant-message`（anchor 回复），忽略 `promoteOn`。
+
+### `bootstrapTools`
+
+默认 `["bash", "read"]`，对应 modeltest 98/99 分 anchored-standard 快照的 `shell + read`。`bash`/`pwsh` 会按目录里实际存在的平台 shell 归一化（`pwsh` 优先）。若目录存在 `str_replace_editor`，可显式配置 `["bash", "str_replace_editor"]` 复刻上游 Minimal 精确 schema。
+
+### `taskRouting` + `routerMode`
+
+`taskRouting: true` 后，`routerMode` 决定首轮行为：
+
+- `standard`（默认）：RL 接口还原。系统只保留 DSH minimal 人设，工具面为 shell + `str_replace_editor`；目录缺 `str_replace_editor` 时回退到 `bootstrapTools`。
+- `spec`：旧版深度思考优先。按任务分类选择 persona 与工具面：
+    - `react`（新建/开发）→ doer persona + `read`/`write`/`edit`
+    - `spec`（修复/维护）→ minimal persona + `read`/`edit`/`glob`/`grep`
+    - `weak`（模糊/无关键词）→ 模型自分类 persona + `read`/`write`/`edit`
+    - Flash 模型一律强制 `weak`（w7 + 静态深度思考/决策闭环锚）。
+
+### `suppressedContextSources`
+
+- 首请求剥离自动注入的 AGENTS.md / skill-catalog / workspace 摘要。
+- 消息带 `source.kind` 时按来源精确过滤；omp/pi 消息无 `source.kind` 时重建为 `[system, last user]`。
+- 含 assistant/toolResult 的多轮历史不重建。
+- 显式配置 `[]` 关闭剥离。
+
+### `bootstrapMaxTokens`
+
+- 默认不封顶。上游 issue #11 实测 Minimal 工具 schema 在适配器默认 maxTokens（256000）下即可锚定 `We need` 轨迹。
+- 配置后才封顶，提升后剥离注入的上限。
+- **仅 pi 生效**。omp 无原生 max-token setter，且 `before_provider_request` 返回值被 openai-completions 传输层丢弃，故 omp 只校验该配置。
+
+### `promotedTools`
+
+- 默认 `[]`：提升后恢复完整目录。
+- 非空：提升后只保留指定工具（如 `["bash", "read", "edit", "glob", "grep"]`），复刻上游 post-promotion resident 行为。
+- `bash`/`pwsh` 按平台 shell 归一化；缺失时 fail-safe 保持完整目录。
+
+### `includeSubagents`
+
+- 默认 `false`：子代理始终完整目录。
+- `true`：omp 子代理（`session_init` 条目）也走 bootstrap/anchor 阶段。
+- pi 无 `session_init`，该选项主要对 omp 生效。
+
+### zero 模式
+
+- 首请求工具集置空，并把最后一个 user 消息内容替换为 `anchorText`。
+- anchor 回复落库后提升。
+- 与上游差异：上游会把真实消息自动推迟到下一轮；本插件无法安全推迟持久化消息，因此 anchor 轮结束后需要用户继续一句，真实消息在后续轮次用完整目录/resident 集回答。
+- compaction 后不再注入 anchor；配置 `compactionTools` 则暴露平台 shell + 工作集，否则保持零工具直到新的 assistant 消息。
 
 ## 验证
 
-会话里跑 `/anchored-tools`,报告当前模型、是否命中目标、模式、任务路由、提升触发器、当前阶段(`bootstrap` / `promoted (full catalog)` / `promoted (resident catalog)` / `not-targeted` / `disabled`),以及轨迹指纹(`we` / `let's` / `let me` 计数)。
+会话里运行：
 
-首次锚定与系统提示改写会打日志(omp 走 `pi.logger`,pi 走 console):
-
+```sh
+/anchored-tools
 ```
+
+报告当前模型、是否命中目标、模式、任务路由、`routerMode`、提升触发器、当前阶段（`bootstrap` / `promoted (full catalog)` / `promoted (resident catalog)` / `not-targeted` / `disabled`）以及轨迹指纹（`we` / `let's` / `let me`）。
+
+首次锚定与系统提示改写会打日志：
+
+```text
 [anchored-tools] anchoring first request for deepseek/deepseek-v4-pro: 2/25 tools (bash, read)                                       # two-tool (default)
 [anchored-tools] anchoring first request for deepseek/deepseek-v4-pro: 5/25 tools (read, edit, glob, grep, bash) [task-routing spec]   # two-tool
 [anchored-tools] anchoring first request for deepseek/deepseek-v4-pro: 4/25 tools (read, write, edit, bash) [task-routing react]      # two-tool
@@ -168,57 +232,75 @@ pi install omp-pi-anchored-standard
 ```sh
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # node --test(原生 TS,无需 bun;bun 环境同样可跑 node:test)
+npm test            # node --test（原生 TS，无需 bun；bun 环境同样可跑 node:test）
+```
+
+## 目录结构
+
+```text
+src/
+  core.ts   # 共享纯逻辑：promotion / bootstrap / router / prompt / config
+  omp.ts    # omp 入口：setActiveTools + context 注入 anchor + systemPrompt
+  pi.ts     # pi 入口：before_provider_request + buildContextEntries
+test/
+  core.test.ts   # node:test 单测（136 例）
 ```
 
 ## 更新记录
 
+### 0.11.1
+
+- 重写并优化 README：更清晰的结构、完整配置表、安装/验证/限制说明。
+- 无功能变更。
+
 ### 0.11.0
 
-- 对齐 `dsh-router-standard` v0.2.0/v0.2.1:
-    - 新增 `routerMode`(`standard` 默认 / `spec`)。
-    - `standard`:首轮 RL 接口还原——系统只保留 DSH minimal 人设,工具面为 shell + `str_replace_editor`。
-    - `spec`:旧版任务分类 persona + 读/写/编辑工具面。
-- omp/pi 双入口的 `taskRouting` 均支持 `routerMode`;`/anchored-tools` 显示当前 `routerMode`。
-- 文档与测试同步更新(`136` 例)。
+- 对齐 `dsh-router-standard` v0.2.0/v0.2.1：
+    - 新增 `routerMode`（`standard` 默认 / `spec`）。
+    - `standard`：RL 接口还原，首轮系统只保留 DSH minimal 人设，工具面为 shell + `str_replace_editor`。
+    - `spec`：旧版任务分类 persona + 读/写/编辑工具面。
+- omp/pi 双入口的 `taskRouting` 均支持 `routerMode`；`/anchored-tools` 显示当前 `routerMode`。
+- 文档与测试同步更新（136 例）。
 
 ### 0.10.0
 
-- 对齐上游 `dsh-anchored-standard` 最新版:`promoteOn` 默认改为 `either`,纯文本首答也会在下一轮提升。
-- 新增 `promotedTools`:提升后可切换到上游 resident 工具集,默认 `[]` 仍恢复完整目录。
-- 新增 `includeSubagents`:默认 `false` 豁免子代理;设为 `true` 后 omp 子代理也走 bootstrap/anchor 阶段。
-- omp/pi 双入口同步支持上述配置;`/anchored-tools` 增加 `promoted (resident catalog)` 与 `promoted tools` 展示。
-- 文档与测试同步更新(`133` 例)。
+- 对齐上游 `dsh-anchored-standard` 最新版：`promoteOn` 默认改为 `either`。
+- 新增 `promotedTools`：提升后可切换到上游 resident 工具集，默认 `[]` 仍恢复完整目录。
+- 新增 `includeSubagents`：默认 `false` 豁免子代理；`true` 后 omp 子代理也走 bootstrap/anchor 阶段。
+- omp/pi 双入口同步支持上述配置；`/anchored-tools` 增加 `promoted (resident catalog)` 与 `promoted tools` 展示。
+
+### 0.9.0
+
+- 默认对齐 modeltest 98/99 分 anchored-standard 高分开局。
+- 支持 omp/pi 双宿主、zero 模式、任务路由、上下文剥离、compaction epoch。
 
 ## 已知限制
 
-- **omp** 用 `setActiveTools` 收窄活动工具集,对**所有**传输层生效(含 in-band 方言:方言目录由活动工具生成,空/收窄集合会同步反映到 system prompt 目录块);**pi** 用 `before_provider_request` payload 过滤(pi 端口验证有效,本机未装 pi 无法复测)。
-- omp 的 `before_provider_request` payload 替换对 openai-completions 传输(deepseek 等)无效(上游丢弃返回值),故 omp 入口不依赖它。
-- `bootstrapMode: "zero"` 的 anchor 轮结束需用户继续一句(真实消息不自动推迟),见上文差异说明。
-- pi 侧无 `session_init` 条目,子代理豁免(`includeSubagents: false`)仅 omp 能识别;pi 子代理与其他会话同等对待。
-- `bootstrapMaxTokens` 默认不封顶(opt-in),且仅 pi 生效:omp 无原生 max-token setter,其 `before_provider_request` 返回值被 openai-completions 传输层丢弃(见上),故 omp 只校验该配置、不施加输出预算封顶。
-- `models` 默认 `["deepseek-v4-pro"]`;显式配置 `[]` 可关闭锚定,不再要求用户必须配置目标模型。
-- 上游 `suppressedContextSources` 已移植:消息带 `source.kind` 时按来源过滤;omp/pi 消息无 `source.kind`,故首请求重建为 `[system, user]`;`[]` 关闭剥离。
+- omp 用 `setActiveTools` 收窄活动工具集；pi 用 `before_provider_request` payload 过滤。
+- omp 的 `before_provider_request` payload 替换对 openai-completions 传输无效，因此 omp 入口不依赖它。
+- `bootstrapMode: "zero"` 的 anchor 轮结束后需要用户继续一句，真实消息不自动推迟。
+- pi 无 `session_init`，子代理豁免（`includeSubagents: false`）仅 omp 能识别。
+- `bootstrapMaxTokens` 默认不封顶且仅 pi 生效。
+- `models` 默认 `["deepseek-v4-pro"]`；显式配置 `[]` 可关闭锚定。
 
 ## 参考实现
 
-本插件是以下上游实测 preset 的 omp/pi 移植,默认零配置覆盖官方 API 与 opencode-go 两条路径:
+本插件是以下上游实测 preset 的 omp/pi 移植：
 
 | 路径        | Flash                                                                                       | Pro                                                                          |
 | ----------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| 官方 API    | [dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite)(dsh-router-standard)    | [dsh-anchored-standard](https://github.com/xiaobright/dsh-anchored-standard) |
+| 官方 API    | [dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite)（dsh-router-standard）  | [dsh-anchored-standard](https://github.com/xiaobright/dsh-anchored-standard) |
 | opencode-go | [v4-flash-godmode-opencode-go](https://github.com/SheberDavid/v4-flash-godmode-opencode-go) | [myDshPresets](https://github.com/0liveiraaa/myDshPresets)                   |
 
-采纳要点:
+采纳要点：
 
-- `bootstrapTools` 默认 `["bash", "read"]`:modeltest 的 98/99 分 anchored-standard 冻结快照首轮就是 `shell + read`;omp/pi 用宿主等价的 `bash`/`pwsh` + `read`,并在目录中存在 `str_replace_editor` 时允许显式切换回 Minimal 精确 schema。
-- `taskRouting` 下 Flash 一律 `weak` 并静态并入 w7 深度思考/决策闭环锚(v4-flash-godmode 对 opencode-go 的适配;omp/pi 同样无 DSH 式 per-message inbox,动态近场引导不可用)。
-- `routerMode`(`standard`/`spec`)移植自 dsh-router-standard v0.2.0:`standard` 默认 RL 接口还原(shell+`str_replace_editor`),`spec` 保留旧版分类 persona + 读/写/编辑工具面。
-- 平台 shell 选择 `pwsh` 优先(dsh-router-standard router-bootstrap)。
-- `compactionTools` / compaction epoch 移植自 dsh-anchored-standard `compaction-epoch.mjs`(compaction 后作为「第二个首请求」重新锚定)。
-- `promoteOn` 默认 `either`、`promotedTools` resident 集与 `includeSubagents` 均对齐 dsh-anchored-standard 最新版(后两者为可选;默认仍恢复完整目录、默认豁免子代理)。
-- zero 模式与首请求上下文剥离对应 dsh-anchored-standard 的 zero-anchored-standard / whoami-standard(`anchorText` 可配 `你是谁`)与 `suppressedContextSources`(issue #11);myDshPresets 的 warmup 轮思路与 zero 模式同源(warmupbetter 对应官方 API,warmupbetter-replay 对应 opencode-go)。
+- `bootstrapTools` 默认 `["bash", "read"]`，omp/pi 用宿主等价 shell + `read`；存在 `str_replace_editor` 时可显式切回 Minimal 精确 schema。
+- `routerMode`（`standard`/`spec`）移植自 dsh-router-standard v0.2.0。
+- Flash 在 `taskRouting` 下强制 `weak`，并静态并入 w7 深度思考/决策闭环锚。
+- 平台 shell 选择 `pwsh` 优先。
+- `compactionTools` / compaction epoch 移植自 `compaction-epoch.mjs`。
+- zero 模式与 `suppressedContextSources` 对应 zero-anchored-standard / whoami-standard。
 
 ## License
 
-MIT。概念移植自 [`xiaobright/dsh-anchored-standard`](https://github.com/xiaobright/dsh-anchored-standard)(MIT,本身派生自 DeepSeek Harness Standard preset)、[`yjh051108/dsh-routing-suite`](https://github.com/yjh051108/dsh-routing-suite)(MIT)、[`SheberDavid/v4-flash-godmode-opencode-go`](https://github.com/SheberDavid/v4-flash-godmode-opencode-go)(MIT)与 [`dbydd/pi-anchored-tool-for-dspro`](https://github.com/dbydd/pi-anchored-tool-for-dspro)(MIT)。与 DeepSeek / pi 项目无关联,未经其背书。
+MIT。概念移植自 [`xiaobright/dsh-anchored-standard`](https://github.com/xiaobright/dsh-anchored-standard)（MIT）、[`yjh051108/dsh-routing-suite`](https://github.com/yjh051108/dsh-routing-suite)（MIT）、[`SheberDavid/v4-flash-godmode-opencode-go`](https://github.com/SheberDavid/v4-flash-godmode-opencode-go)（MIT）与 [`dbydd/pi-anchored-tool-for-dspro`](https://github.com/dbydd/pi-anchored-tool-for-dspro)（MIT）。与 DeepSeek / pi 项目无关联，未经其背书。
