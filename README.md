@@ -39,7 +39,7 @@ zero:     空工具 + anchor 回合    resident 默认 / 完整目录(显式[]) 
 
 ## 安装
 
-当前版本：`omp-pi-anchored-standard@0.14.0`
+当前版本：`omp-pi-anchored-standard@0.14.1`
 
 ### omp
 
@@ -69,10 +69,10 @@ pi install omp-pi-anchored-standard
 或加入 `~/.pi/agent/settings.json` 的 `packages`：
 
 ```jsonc
-{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.14.0"] }
+{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.14.1"] }
 ```
 
-> 版本锁：git 安装可用 `@v0.14.0`（pi）/ `#v0.14.0`（omp）；npm 安装默认 `latest`（`0.14.0`）。
+> 版本锁：git 安装可用 `@v0.14.1`（pi）/ `#v0.14.1`（omp）；npm 安装默认 `latest`（`0.14.1`）。
 
 ## 配置
 
@@ -260,10 +260,16 @@ src/
   omp.ts    # omp 入口：setActiveTools + context 注入 anchor + systemPrompt
   pi.ts     # pi 入口：before_provider_request + buildContextEntries
 test/
-  core.test.ts   # node:test 单测（136 例）
+  core.test.ts   # node:test 单测（143 例）
 ```
 
 ## 更新记录
+
+### 0.14.1
+
+- 性能：`filterTools` 单遍提取工具名并直接过滤，避免对同一 catalog 重复调用 `toolName`。
+- 性能：`toolNames` 改为单遍收集；`countMatches` 改用 `String.prototype.match` 计数。
+- 性能：trajectory 指纹计数合并为单次正则扫描（`let me` / `we` / `let's`）。
 
 ### 0.14.0
 
