@@ -35,9 +35,12 @@ export function toolName(t: ToolLike): string | undefined {
  */
 export function toolNames(tools: ToolLike[] | undefined): string[] {
 	if (!Array.isArray(tools)) return [];
-	return tools
-		.map((t) => toolName(t))
-		.filter((n): n is string => typeof n === "string");
+	const names: string[] = [];
+	for (const tool of tools) {
+		const name = toolName(tool);
+		if (typeof name === "string") names.push(name);
+	}
+	return names;
 }
 
 function isMergeableObject(value: unknown): value is Record<string, unknown> {
@@ -128,9 +131,8 @@ const SPEC_RE =
 	/(修复|修一下|调试|重构|维护|排查|报错|出错|崩溃|优化|审查|review|fix|debug|refactor|maintain|repair|broken|break|为什么|异常|故障|迁移|升级|兼容)/gi;
 
 function countMatches(re: RegExp, text: string): number {
-	let count = 0;
-	for (const _ of text.matchAll(re)) count++;
-	return count;
+	const matches = text.match(re);
+	return matches ? matches.length : 0;
 }
 
 /**
@@ -404,15 +406,20 @@ export function filterTools(
 	if (!Array.isArray(payloadTools) || payloadTools.length === 0) {
 		return { changed: false, tools: payloadTools ?? [], missing: [] };
 	}
-	const available = new Set(toolNames(payloadTools));
+	const available = new Set<string>();
 	const bootstrapSet = new Set(bootstrap);
+	const filtered: ToolLike[] = [];
+	for (const tool of payloadTools) {
+		const name = toolName(tool);
+		if (name !== undefined) {
+			available.add(name);
+			if (bootstrapSet.has(name)) filtered.push(tool);
+		}
+	}
 	const missing = bootstrap.filter((n) => !available.has(n));
 	if (missing.length > 0) {
 		return { changed: false, tools: payloadTools, missing };
 	}
-	const filtered = payloadTools.filter((t) =>
-		bootstrapSet.has(toolName(t) ?? ""),
-	);
 	const changed = filtered.length !== payloadTools.length;
 	return { changed, tools: changed ? filtered : payloadTools, missing: [] };
 }
@@ -581,17 +588,27 @@ export interface TrajectoryCounts {
 	lets: number;
 }
 
-const LET_ME_RE = /\blet me\b/gi;
-const WE_RE = /\bwe\b/gi;
-const LETS_RE = /\blet's\b/gi;
+const TRAJECTORY_RE = /\blet me\b|\bwe\b|\blet's\b/gi;
 
 /** Count the `let me` / `we` / `let's` fingerprint across reasoning + text. */
 export function countTrajectory(text: string): TrajectoryCounts {
-	return {
-		letMe: countMatches(LET_ME_RE, text),
-		we: countMatches(WE_RE, text),
-		lets: countMatches(LETS_RE, text),
-	};
+	const counts: TrajectoryCounts = { letMe: 0, we: 0, lets: 0 };
+	TRAJECTORY_RE.lastIndex = 0;
+	let match: RegExpExecArray | null;
+	while ((match = TRAJECTORY_RE.exec(text)) !== null) {
+		switch (match[0].toLowerCase()) {
+			case "let me":
+				counts.letMe++;
+				break;
+			case "we":
+				counts.we++;
+				break;
+			case "let's":
+				counts.lets++;
+				break;
+		}
+	}
+	return counts;
 }
 
 export function addTrajectory(
