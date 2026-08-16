@@ -44,10 +44,12 @@ import {
 	taskTextFromEntries,
 	taskTextFromMessages,
 	toolName,
+	toolNames,
 	trajectoryTextFromMessage,
 	validateRawConfig,
 	zeroAnchorPayload,
 	type RawConfig,
+	type ToolLike,
 } from "../src/core.ts";
 
 describe("toolName", () => {
@@ -68,6 +70,27 @@ describe("toolName", () => {
 	});
 	test("unknown shape returns undefined", () => {
 		assert.equal(toolName({}), undefined);
+	});
+});
+
+describe("toolNames", () => {
+	test("collects defined names from mixed shapes", () => {
+		assert.deepEqual(
+			toolNames([
+				{ type: "function", function: { name: "bash" } },
+				{ name: "read" },
+				{ type: "custom", custom: { name: "edit" } },
+				{},
+			]),
+			["bash", "read", "edit"],
+		);
+	});
+	test("undefined and non-array catalogs are empty", () => {
+		assert.deepEqual(toolNames(undefined), []);
+		assert.deepEqual(
+			toolNames({ name: "not-a-catalog" } as unknown as ToolLike[]),
+			[],
+		);
 	});
 });
 

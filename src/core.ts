@@ -29,6 +29,17 @@ export function toolName(t: ToolLike): string | undefined {
 	return t.name;
 }
 
+/**
+ * Extract the defined tool names from a serialized provider tool catalog.
+ * Shared by the pi entry point and the payload filtering helpers.
+ */
+export function toolNames(tools: ToolLike[] | undefined): string[] {
+	if (!Array.isArray(tools)) return [];
+	return tools
+		.map((t) => toolName(t))
+		.filter((n): n is string => typeof n === "string");
+}
+
 function isMergeableObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -393,7 +404,7 @@ export function filterTools(
 	if (!Array.isArray(payloadTools) || payloadTools.length === 0) {
 		return { changed: false, tools: payloadTools ?? [], missing: [] };
 	}
-	const available = new Set(payloadTools.map((t) => toolName(t)));
+	const available = new Set(toolNames(payloadTools));
 	const bootstrapSet = new Set(bootstrap);
 	const missing = bootstrap.filter((n) => !available.has(n));
 	if (missing.length > 0) {
@@ -526,6 +537,7 @@ export function stripContextMessages(
 	if (!Array.isArray(messages) || messages.length === 0) return undefined;
 	if (suppressedSources.length === 0) return undefined;
 	let userIdx = -1;
+	let systemIdx = -1;
 	let hasSourceKind = false;
 	for (let i = 0; i < messages.length; i++) {
 		const m = messages[i];
@@ -534,24 +546,23 @@ export function stripContextMessages(
 			return undefined;
 		}
 		if (r === "user") userIdx = i;
+		if (r === "system" || r === "developer") {
+			if (systemIdx < 0) systemIdx = i;
+		}
 		const kind = m?.source?.kind;
 		if (typeof kind === "string" && kind.length > 0) hasSourceKind = true;
 	}
 	if (userIdx < 0) return undefined;
 
 	if (hasSourceKind) {
+		const suppressed = new Set(suppressedSources);
 		const kept = messages.filter((m) => {
 			const kind = m?.source?.kind;
-			return (
-				typeof kind !== "string" || !suppressedSources.includes(kind)
-			);
+			return typeof kind !== "string" || !suppressed.has(kind);
 		});
 		return kept.length === messages.length ? undefined : kept;
 	}
 
-	const systemIdx = messages.findIndex(
-		(m) => m?.role === "system" || m?.role === "developer",
-	);
 	const kept: PayloadMessage[] = [];
 	if (systemIdx >= 0) {
 		const s = messages[systemIdx];

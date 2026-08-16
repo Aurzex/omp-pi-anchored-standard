@@ -79,6 +79,7 @@ import {
 	taskTextFromEntries,
 	taskTextFromMessages,
 	toolName,
+	toolNames,
 	trajectoryTextFromMessage,
 	validateRawConfig,
 	zeroAnchorPayload,
@@ -259,9 +260,7 @@ export default function (pi: ExtensionAPI) {
 			if (cfg.promotedTools.length > 0) {
 				const promotedTools = payload.tools as ToolLike[] | undefined;
 				if (Array.isArray(promotedTools) && promotedTools.length > 0) {
-					const available = promotedTools
-						.map((t) => toolName(t))
-						.filter((n): n is string => typeof n === "string");
+					const available = toolNames(promotedTools);
 					const selected = selectPromotedTools(
 						available,
 						cfg.promotedTools,
@@ -306,11 +305,7 @@ export default function (pi: ExtensionAPI) {
 
 			// Post-compaction: no anchor, controlled tool surface.
 			const zeroTools = payload.tools as ToolLike[] | undefined;
-			const zeroAvailable = Array.isArray(zeroTools)
-				? zeroTools
-						.map((t) => toolName(t))
-						.filter((n): n is string => typeof n === "string")
-				: [];
+			const zeroAvailable = toolNames(zeroTools);
 			if (zeroAvailable.length > 0) {
 				const selected = selectZeroBootstrapTools(
 					zeroAvailable,
@@ -345,9 +340,7 @@ export default function (pi: ExtensionAPI) {
 			// first and falls back to the configured bootstrap tools.
 			const tools = payload.tools as ToolLike[] | undefined;
 			if (Array.isArray(tools) && tools.length > 0) {
-				const available = tools
-					.map((t) => toolName(t))
-					.filter((n): n is string => typeof n === "string");
+				const available = toolNames(tools);
 				const selected = selectBootstrapTools(
 					cfg,
 					taskMode,
