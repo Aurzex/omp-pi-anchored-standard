@@ -444,6 +444,7 @@ export default function (pi: ExtensionAPI) {
 			const stripped = stripContextMessages(
 				messages,
 				cfg.suppressedContextSources,
+				cfg.allowKinds,
 			);
 			if (stripped) return { messages: stripped as AgentMessage[] };
 		}

@@ -39,7 +39,7 @@ zero:     空工具 + anchor 回合    resident 默认 / 完整目录(显式[]) 
 
 ## 安装
 
-当前版本：`omp-pi-anchored-standard@0.14.1`
+已发布到 npm（`omp-pi-anchored-standard@0.15.0`）
 
 ### omp
 
@@ -69,10 +69,10 @@ pi install omp-pi-anchored-standard
 或加入 `~/.pi/agent/settings.json` 的 `packages`：
 
 ```jsonc
-{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.14.1"] }
+{ "packages": ["git:github.com/Aurzex/omp-pi-anchored-standard@v0.15.0"] }
 ```
 
-> 版本锁：git 安装可用 `@v0.14.1`（pi）/ `#v0.14.1`（omp）；npm 安装默认 `latest`（`0.14.1`）。
+> 版本锁：git 安装可用 `@v0.15.0`（pi）/ `#v0.15.0`（omp）；npm 安装默认 `latest`（`0.15.0`）。
 
 ## 配置
 
@@ -91,6 +91,7 @@ pi install omp-pi-anchored-standard
 | `taskRouting`              | `boolean` / `false`                                           | 任务感知路由，仅 two-tool 模式                                                               |
 | `routerMode`               | `"standard" \| "spec"` / `"standard"`                         | `taskRouting: true` 时生效；standard=RL 接口还原，spec=深度思考优先                          |
 | `suppressedContextSources` | `string[]` / `["skill-catalog", "agent-instructions"]`        | 首请求剥离的自动注入上下文；`[]` 关闭剥离                                                    |
+| `allowKinds`               | `string[]` / `["skill-invocation"]`                           | 首请求上下文门的额外放行 `source.kind`（上游 context-gate）；`[]` 只保留 claimed batch       |
 | `compactionTools`          | `string[]` / `[]`                                             | compaction 后、重新提升前的工作集                                                            |
 | `promotedTools`            | `string[]` / `["bash", "read", "edit", "glob", "grep"]`       | 提升后 resident 工具集（默认，对齐上游 post-promotion）；`[]` = 恢复完整目录                 |
 | `includeSubagents`         | `boolean` / `false`                                           | `true` 时子代理也走 bootstrap/anchor 阶段；omp 生效                                          |
@@ -121,6 +122,7 @@ anchoredTools:
     bootstrapTools:
         - bash
         - read
+    allowKinds: [skill-invocation]
     notify: true
 ```
 
@@ -148,8 +150,8 @@ anchoredTools:
 				"promotedTools": [],
 			},
 		},
-		"bootstrapMode": "two-tool",
 		"bootstrapTools": ["bash", "read"],
+		"allowKinds": ["skill-invocation"],
 		"notify": true,
 	},
 }
@@ -192,12 +194,13 @@ anchoredTools:
     - `weak`（模糊/无关键词）→ 模型自分类 persona + `read`/`write`/`edit`
     - Flash 模型一律强制 `weak`（w7 + 静态深度思考/决策闭环锚）。
 
-### `suppressedContextSources`
+### `suppressedContextSources` + `allowKinds`
 
-- 首请求剥离自动注入的 AGENTS.md / skill-catalog / workspace 摘要。
-- 消息带 `source.kind` 时按来源精确过滤；omp/pi 消息无 `source.kind` 时重建为 `[system, last user]`。
+- 首请求剥离自动注入的 AGENTS.md / skill-catalog / workspace 摘要（上游 context-gate 的 omp/pi 移植）。
+- 消息带 `source.kind` 时：只保留 claimed batch（system + last user）+ `allowKinds` 放行项；自动注入（无论是否在 `suppressedContextSources` 中）与未知来源都会被剥离。
+- omp/pi 消息无 `source.kind` 时重建为 `[system, last user]`。
 - 含 assistant/toolResult 的多轮历史不重建。
-- 显式配置 `[]` 关闭剥离。
+- 显式配置 `suppressedContextSources: []` 关闭整个上下文剥离。
 
 ### `bootstrapMaxTokens`
 
@@ -260,10 +263,16 @@ src/
   omp.ts    # omp 入口：setActiveTools + context 注入 anchor + systemPrompt
   pi.ts     # pi 入口：before_provider_request + buildContextEntries
 test/
-  core.test.ts   # node:test 单测（143 例）
+  core.test.ts   # node:test 单测（144 例）
 ```
 
 ## 更新记录
+
+### 0.15.0
+
+- 对齐上游 `context-gate.mjs`：新增 `allowKinds`（默认 `["skill-invocation"]`）。
+- 首请求上下文剥离改为 claimed-batch + allowlist 语义：带 `source.kind` 的消息只保留 system/last user 与 `allowKinds` 放行项，自动注入与未知来源都会被剥离。
+- omp/pi 双入口同步传递 `allowKinds`；文档与测试同步更新（144 例）。
 
 ### 0.14.1
 
@@ -343,7 +352,7 @@ test/
 - 平台 shell 选择 `pwsh` 优先。
 - `compactionTools` / compaction epoch 移植自 `compaction-epoch.mjs`。
 - `promotedTools` 默认 resident 集，对应上游 post-promotion resident 行为；显式 `[]` 保留完整目录。
-- zero 模式与 `suppressedContextSources` 对应 zero-anchored-standard / whoami-standard。
+- `allowKinds` / claimed-batch 上下文剥离移植自上游 `context-gate.mjs`；zero 模式与 `suppressedContextSources` 对应 zero-anchored-standard / whoami-standard。
 
 ## License
 

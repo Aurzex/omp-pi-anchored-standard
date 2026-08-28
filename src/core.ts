@@ -520,12 +520,21 @@ export const DEFAULT_SUPPRESSED_SOURCES = [
 ];
 
 /**
+ * Message kinds allowed through the first-request context gate beyond the
+ * claimed batch (system + last user). Ported from upstream `context-gate.mjs`
+ * (default `[skill-invocation]`): automatic injections are stripped, but a
+ * user-initiated skill gesture survives.
+ */
+export const DEFAULT_ALLOW_KINDS = ["skill-invocation"];
+
+/**
  * Strip auto-injected context from the FIRST request. This is the omp/pi
- * port of upstream `suppressedContextSources` (issue #11):
+ * port of upstream `context-gate.mjs` (formerly `suppressedContextSources`,
+ * issue #11):
  *
- * - When messages carry `source.kind` (DSH-like payloads), filter exactly by
- *   the suppressed kinds — user-initiated skill gestures and other sources
- *   survive.
+ * - When messages carry `source.kind` (DSH-like payloads), keep only the
+ *   claimed batch (system/developer + last user) plus the `allowKinds`
+ *   entries; automatic injections — suppressed or unknown — are stripped.
  * - When messages lack `source.kind` (omp/pi payloads), fall back to
  *   rebuilding the message list as `[system/developer, last user]`, so
  *   workspace instructions, AGENTS.md/CLAUDE.md digests, and the skill
@@ -540,6 +549,7 @@ export const DEFAULT_SUPPRESSED_SOURCES = [
 export function stripContextMessages(
 	messages: PayloadMessage[] | undefined,
 	suppressedSources: string[] = DEFAULT_SUPPRESSED_SOURCES,
+	allowKinds: string[] = DEFAULT_ALLOW_KINDS,
 ): PayloadMessage[] | undefined {
 	if (!Array.isArray(messages) || messages.length === 0) return undefined;
 	if (suppressedSources.length === 0) return undefined;
@@ -562,10 +572,14 @@ export function stripContextMessages(
 	if (userIdx < 0) return undefined;
 
 	if (hasSourceKind) {
+		const allowed = new Set(allowKinds);
 		const suppressed = new Set(suppressedSources);
-		const kept = messages.filter((m) => {
+		const kept = messages.filter((m, i) => {
+			if (i === systemIdx || i === userIdx) return true;
 			const kind = m?.source?.kind;
-			return typeof kind !== "string" || !suppressed.has(kind);
+			if (typeof kind !== "string") return false;
+			if (suppressed.has(kind)) return false;
+			return allowed.has(kind);
 		});
 		return kept.length === messages.length ? undefined : kept;
 	}
@@ -997,6 +1011,7 @@ export interface ModelConfig {
 	taskRouting: boolean;
 	routerMode: RouterMode;
 	suppressedContextSources: string[];
+	allowKinds: string[];
 	compactionTools: string[];
 	includeSubagents: boolean;
 	promotedTools: string[];
@@ -1076,6 +1091,7 @@ export const ALLOWED_RAW_KEYS = [
 	"taskRouting",
 	"routerMode",
 	"suppressedContextSources",
+	"allowKinds",
 	"compactionTools",
 	"includeSubagents",
 	"promotedTools",
@@ -1148,6 +1164,14 @@ export function validateRawConfig(
 		);
 	}
 	if (
+		raw.allowKinds !== undefined &&
+		!isNonEmptyStringArray(raw.allowKinds)
+	) {
+		warn(
+			`[${extName}] invalid allowKinds ${JSON.stringify(raw.allowKinds)}; using default allowlist`,
+		);
+	}
+	if (
 		raw.compactionTools !== undefined &&
 		!isNonEmptyStringArray(raw.compactionTools)
 	) {
@@ -1210,6 +1234,7 @@ export interface RawConfig {
 	taskRouting?: boolean;
 	routerMode?: unknown;
 	suppressedContextSources?: string[];
+	allowKinds?: string[];
 	compactionTools?: string[];
 	includeSubagents?: boolean;
 	promotedTools?: string[];
@@ -1271,6 +1296,7 @@ const DEFAULT_MODEL_CONFIG: ModelConfig = {
 	// deep-think-first classification personas + read/write/edit core.
 	routerMode: "standard",
 	suppressedContextSources: [...DEFAULT_SUPPRESSED_SOURCES],
+	allowKinds: [...DEFAULT_ALLOW_KINDS],
 	compactionTools: [],
 	includeSubagents: false,
 	// Upstream's post-promotion resident-set behavior: keep only the platform
@@ -1363,6 +1389,16 @@ function applyModelDefaults(raw: RawConfig): ModelConfig {
 					),
 				]
 			: [...DEFAULT_MODEL_CONFIG.suppressedContextSources],
+		allowKinds: Array.isArray(raw.allowKinds)
+			? [
+					...new Set(
+						raw.allowKinds.filter(
+							(s): s is string =>
+								typeof s === "string" && s.length > 0,
+						),
+					),
+				]
+			: [...DEFAULT_MODEL_CONFIG.allowKinds],
 		compactionTools: isNonEmptyStringArray(raw.compactionTools)
 			? [...new Set(raw.compactionTools)]
 			: [],

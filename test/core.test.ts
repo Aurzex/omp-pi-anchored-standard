@@ -724,6 +724,7 @@ describe("applyDefaults", () => {
 			taskRouting: false,
 			routerMode: "standard",
 			suppressedContextSources: ["skill-catalog", "agent-instructions"],
+			allowKinds: ["skill-invocation"],
 			compactionTools: [],
 			includeSubagents: false,
 			promotedTools: [...DEFAULT_PROMOTED_TOOLS],
@@ -1518,6 +1519,33 @@ describe("stripContextMessages", () => {
 		const stripped = stripContextMessages(messages);
 		assert.deepStrictEqual(stripped, [
 			{ role: "system", content: "s" },
+			{ role: "user", content: "real task", source: { kind: "user" } },
+		]);
+	});
+
+	test("allowKinds keeps only the claimed batch plus allowed source kinds", () => {
+		const messages = [
+			{ role: "system", content: "s" },
+			{
+				role: "user",
+				content: "workspace digest",
+				source: { kind: "agent-instructions" },
+			},
+			{
+				role: "user",
+				content: "skill gesture",
+				source: { kind: "skill-invocation" },
+			},
+			{ role: "user", content: "real task", source: { kind: "user" } },
+		];
+		const stripped = stripContextMessages(messages);
+		assert.deepStrictEqual(stripped, [
+			{ role: "system", content: "s" },
+			{
+				role: "user",
+				content: "skill gesture",
+				source: { kind: "skill-invocation" },
+			},
 			{ role: "user", content: "real task", source: { kind: "user" } },
 		]);
 	});

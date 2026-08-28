@@ -381,6 +381,7 @@ export default function (pi: ExtensionAPI) {
 			const stripped = stripContextMessages(
 				payload.messages as PayloadMessage[] | undefined,
 				cfg.suppressedContextSources,
+				cfg.allowKinds,
 			);
 			if (stripped) {
 				payload = { ...payload, messages: stripped };
